@@ -1,0 +1,15 @@
+{
+  "name": "Focus Tool",
+  "short_name": "Focus",
+  "description": "Your task list, timer and day plan.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFF7EF",
+  "theme_color": "#FFF7EF",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}
