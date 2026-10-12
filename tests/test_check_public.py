@@ -119,7 +119,7 @@ def test_file_containing_a_task_name_is_rejected_without_printing_the_name(
 
     assert result.returncode == 1
     assert "notes.txt" in result.stderr
-    # The whole point of this script: never print the task name itself.
+    # The whole point of this script is to never print the task name itself.
     assert "Write intro" not in result.stdout
     assert "Write intro" not in result.stderr
 
@@ -158,3 +158,25 @@ def test_missing_state_file_does_not_crash(repo: Path, tmp_path: Path):
     result = run_check(repo, missing_state, "--staged")
 
     assert result.returncode == 0
+
+
+def test_staged_content_is_checked_even_if_disk_copy_is_cleaned_afterwards(
+    repo: Path, fake_state: Path
+):
+    # A file is staged while it still contains a task name, then the
+    # working-tree copy is rewritten (e.g. by the author scrubbing it) before
+    # the commit runs. The check must still block it, because what matters
+    # is what is actually staged for commit, not what is currently on disk.
+    leaky = repo / "draft.txt"
+    leaky.write_text("Plan: Write intro this afternoon.\n", encoding="utf-8")
+    _git(repo, "add", "draft.txt")
+
+    # Rewrite the working-tree copy without the task name, but do not re-add it.
+    leaky.write_text("Nothing to see here.\n", encoding="utf-8")
+
+    result = run_check(repo, fake_state, "--staged")
+
+    assert result.returncode == 1
+    assert "draft.txt" in result.stderr
+    assert "Write intro" not in result.stdout
+    assert "Write intro" not in result.stderr

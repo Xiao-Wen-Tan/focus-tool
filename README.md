@@ -111,14 +111,14 @@ skipped; nothing piles up or carries over.
 
 Every evening around 7 pm (America/Chicago time), an automatic job looks at
 your working hours, your dated tasks and your repeating tasks, and lays out a
-plan for the next day: which task to work on, in which block of time, and for
-how long. You can see this in the **Plan** tab on your phone, or in the Plan
-card on the desktop panel. It shows warnings if something will not fit before
-its date.
+plan for the next day, picking which task to work on, in which block of time,
+and for how long. You can see this in the **Plan** tab on your phone, or in
+the Plan card on the desktop panel. It shows warnings if something will not
+fit before its date.
 
 You do not have to wait for the evening job. A **Re-plan now** button is
-available on both the phone and the desktop: before 7 pm it plans the rest of
-today starting from right now; after 7 pm it plans tomorrow.
+available on both the phone and the desktop. Before 7 pm it plans the rest of
+today starting from right now, and after 7 pm it plans tomorrow.
 
 Your working hours are Monday to Friday 9:00 to 12:00 and 13:30 to 18:00, and
 Saturday and Sunday 10:00 to 12:30, unless you change them in Settings.
@@ -142,7 +142,7 @@ both are online.
 
 Your list can be shared between your phone and your desktop through a private
 GitHub repository, so the data stays yours and does not pass through any other
-service. This is optional: if you never set it up, the desktop app keeps
+service. This is optional. If you never set it up, the desktop app keeps
 working exactly as before, saving to the `data` folder inside Box.
 
 1. Create a **private** GitHub repository to hold your data, for example

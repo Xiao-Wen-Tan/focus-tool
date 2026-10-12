@@ -71,6 +71,27 @@ def git_staged_files(repo_root: Path) -> list[str]:
     return [_norm(p) for p in out.splitlines() if p]
 
 
+def read_staged_blob(repo_root: Path, path: str) -> str | None:
+    """Reads a staged file's content straight from the git index (stage 0),
+    not from the working tree. A file can be staged with a task name in it
+    and then have its working-tree copy edited or cleaned up afterwards; the
+    commit that is about to happen uses the staged content, so that is what
+    must be checked.
+    """
+    result = subprocess.run(
+        ["git", "show", f":{path}"],
+        cwd=repo_root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None  # not in the index (e.g. a deleted path), or git could not read it
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None  # binary; not a text leak we can detect this way
+
+
 def path_reason(path: str) -> str | None:
     """Returns why a path alone is banned, or None if the path is fine."""
     if path == "data" or path.startswith("data/"):
@@ -120,26 +141,38 @@ def load_task_names(state_path: Path) -> list[str]:
     return sorted({n for n in names if len(n) >= MIN_NAME_LEN}, key=len, reverse=True)
 
 
-def content_reason(repo_root: Path, path: str, task_names: list[str]) -> str | None:
-    if not task_names:
+def _text_contains_a_name(text: str | None, task_names: list[str]) -> str | None:
+    if not text or not task_names:
         return None
-    full = repo_root / path
-    try:
-        text = full.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None  # binary or unreadable; not a text leak we can detect this way
-
     for name in task_names:
         if name in text:
             return "contains a task name from the live state file"
     return None
 
 
-def check(repo_root: Path, state_path: Path, staged_only: bool) -> list[tuple[str, str]]:
-    if staged_only:
-        candidates = git_staged_files(repo_root)
+def content_reason(repo_root: Path, path: str, task_names: list[str], from_index: bool) -> str | None:
+    if not task_names:
+        return None
+
+    if from_index:
+        # The file is staged: check the content that would actually be
+        # committed, not whatever happens to be on disk right now.
+        text = read_staged_blob(repo_root, path)
     else:
-        candidates = sorted(set(git_tracked_files(repo_root)) | set(git_staged_files(repo_root)))
+        try:
+            text = (repo_root / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = None  # binary or unreadable; not a text leak we can detect this way
+
+    return _text_contains_a_name(text, task_names)
+
+
+def check(repo_root: Path, state_path: Path, staged_only: bool) -> list[tuple[str, str]]:
+    staged = set(git_staged_files(repo_root))
+    if staged_only:
+        candidates = sorted(staged)
+    else:
+        candidates = sorted(set(git_tracked_files(repo_root)) | staged)
 
     task_names = load_task_names(state_path)
 
@@ -147,7 +180,10 @@ def check(repo_root: Path, state_path: Path, staged_only: bool) -> list[tuple[st
     for path in candidates:
         reason = path_reason(path)
         if reason is None:
-            reason = content_reason(repo_root, path, task_names)
+            # Staged files are checked against the index (what will actually
+            # be committed); tracked-but-not-staged files are checked against
+            # the working tree, since that is the only copy of them that exists.
+            reason = content_reason(repo_root, path, task_names, from_index=path in staged)
         if reason is not None:
             offenses.append((path, reason))
     return offenses
