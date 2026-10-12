@@ -11,6 +11,8 @@ Importable:
     fake.dispatches     # [{"workflow": "replan.yml", "ref": "main", "inputs": {...}}, ...]
     fake.set_rate_limit(reset_at=...)   # next requests answer 403 rate-limited
     fake.clear_rate_limit()
+    fake.force_oversized("state.json") # GET answers 200 with no usable content, like a >1 MB file
+    fake.clear_oversized("state.json")
     fake.stop()
 
 Implements just enough of the real GitHub Contents, repo-check and workflow-dispatch endpoints for
@@ -45,6 +47,7 @@ class FakeGitHub:
         self.files = {}  # path -> {"text": str, "sha": str}
         self.dispatches = []  # list of {"workflow":..., "ref":..., "inputs":...}
         self._rate_limit = None  # None, or {"reset_at": epoch_seconds}
+        self._oversized = {}  # path -> size, forced by force_oversized
         if seed_text is not None:
             self._put(seed_path, seed_text)
         handler = _make_handler(self)
@@ -63,6 +66,15 @@ class FakeGitHub:
 
     def clear_rate_limit(self):
         self._rate_limit = None
+
+    def force_oversized(self, path, size=2_000_000):
+        """Make GET of `path` answer 200 with no usable base64 content, the way the real
+        GitHub contents API behaves for a file over about 1 MB (no "content", "encoding": "none",
+        just a "size"). The file must already exist. Call clear_oversized(path) to undo."""
+        self._oversized[path] = size
+
+    def clear_oversized(self, path):
+        self._oversized.pop(path, None)
 
     def stop(self):
         self._server.shutdown()
@@ -152,6 +164,15 @@ def _make_handler(fake: FakeGitHub):
                     self.send_header("ETag", etag)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                    return
+                if file_path in fake._oversized:
+                    self._send_json(200, {
+                        "name": file_path.rsplit("/", 1)[-1],
+                        "path": file_path,
+                        "sha": entry["sha"],
+                        "size": fake._oversized[file_path],
+                        "encoding": "none",
+                    }, {"ETag": etag})
                     return
                 raw = entry["text"].encode("utf-8")
                 b64 = base64.b64encode(raw).decode("ascii")

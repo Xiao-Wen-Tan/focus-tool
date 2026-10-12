@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import ssl
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -187,7 +189,16 @@ class GitHubStore:
         if status == 304:
             return Remote(text=None, sha=None, etag=etag, not_modified=True)
         data = json.loads(body.decode("utf-8"))
-        text = self._decode_content(data["content"])
+        content = data.get("content")
+        encoding = data.get("encoding")
+        size = data.get("size") or 0
+        if (size > 0 and not content) or (encoding not in (None, "base64")):
+            # GitHub answers this way for a file over about 1 MB: no base64 content, a
+            # non-"base64" encoding (or none at all). Never hand back empty text for that.
+            raise GitHubError(
+                200, f"GitHub returned no usable content for {path} (the file may be too "
+                     f"large for the contents API, which only serves files up to 1 MB this way)")
+        text = self._decode_content(content or "")
         lower = {k.lower(): v for k, v in headers.items()}
         new_etag = lower.get("etag", f'"{data.get("sha", "")}"')
         return Remote(text=text, sha=data["sha"], etag=new_etag, not_modified=False)
@@ -257,10 +268,25 @@ class SyncEngine:
             return {"etag": None, "sha": None, "last_remote_doc": None}
 
     def _save_cache(self, etag, sha, remote_doc):
+        # Write the new content to a temp file next to the real one, then swap it in with a
+        # single os.replace. This keeps the write atomic, so a crash or a Box sync mid-write
+        # never leaves a half-written or truncated cache file behind.
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(
-            json.dumps({"etag": etag, "sha": sha, "last_remote_doc": remote_doc}, ensure_ascii=False),
-            encoding="utf-8")
+        payload = json.dumps({"etag": etag, "sha": sha, "last_remote_doc": remote_doc}, ensure_ascii=False)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=self.cache_path.name + ".", suffix=".tmp", dir=str(self.cache_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, self.cache_path)
+        except Exception:
+            try:
+                os.remove(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def sync(self, local_doc: dict) -> SyncResult:
         cache = self._load_cache()
@@ -272,7 +298,15 @@ class SyncEngine:
             return SyncResult(local_doc, False, False, "rate_limited", e.message, e.retry_after_s)
         except Offline as e:
             return SyncResult(local_doc, False, False, "offline", e.message, None)
+        except GitHubError as e:
+            # A 200 with no usable content, or any other GitHub error get_file has no named
+            # status for, lands here. Never guess at the remote content, and never push over it.
+            return SyncResult(local_doc, False, False, "error", e.message, None)
 
+        # `last_remote_doc` in the cache, and `remote_doc` here, are always the fully migrated
+        # (normalized) form of what is on GitHub, never the raw JSON as GitHub sent it. That way
+        # comparing "did the remote change" never confuses a normalization difference (for
+        # example an older file missing a default field) with a real content change.
         if remote.not_modified:
             remote_doc = cache.get("last_remote_doc")
             sha = cache.get("sha")
@@ -284,17 +318,18 @@ class SyncEngine:
             etag = None
             remote_changed = False
         else:
-            remote_doc = json.loads(remote.text)
+            remote_doc = fc.migrate_doc(json.loads(remote.text))
             sha = remote.sha
             etag = remote.etag
-            remote_changed = fc.canonical(fc.migrate_doc(remote_doc)) != fc.canonical(cache.get("last_remote_doc") or {})
+            cached_remote = cache.get("last_remote_doc")
+            remote_changed = cached_remote is None or fc.canonical(remote_doc) != fc.canonical(cached_remote)
 
         if remote_doc is None:
             merged = fc.migrate_doc(local_doc)
         else:
             merged = fc.merge_docs(local_doc, remote_doc)
 
-        needs_push = sha is None or fc.canonical(merged) != fc.canonical(fc.migrate_doc(remote_doc or {}))
+        needs_push = sha is None or fc.canonical(merged) != fc.canonical(remote_doc or {})
         if not needs_push:
             self._save_cache(etag, sha, remote_doc)
             return SyncResult(merged, remote_changed, False, "ok", "", None)
@@ -318,11 +353,13 @@ class SyncEngine:
                     return SyncResult(local_doc, remote_changed, False, "rate_limited", e.message, e.retry_after_s)
                 except Offline as e:
                     return SyncResult(local_doc, remote_changed, False, "offline", e.message, None)
+                except GitHubError as e:
+                    return SyncResult(local_doc, remote_changed, False, "error", e.message, None)
                 if fresh.text is None:
                     sha = None
                     merged = fc.migrate_doc(merged)
                 else:
-                    remote_doc = json.loads(fresh.text)
+                    remote_doc = fc.migrate_doc(json.loads(fresh.text))
                     sha = fresh.sha
                     etag = fresh.etag
                     remote_changed = True

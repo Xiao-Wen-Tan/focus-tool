@@ -290,3 +290,81 @@ def test_token_functions_use_win32cred(monkeypatch):
 def gh_store_blob_sha(text: str) -> str:
     from tests.fake_github import blob_sha
     return blob_sha(text.encode("utf-8"))
+
+
+# ---------- fix round 1 ----------
+
+def test_save_cache_writes_atomically_and_leaves_no_temp_file(tmp_path):
+    store = gh.GitHubStore(owner="me", repo="focus-data", token="t", api="http://127.0.0.1:1")
+    cache_path = tmp_path / "cache.json"
+    engine = gh.SyncEngine(store, cache_path)
+
+    engine._save_cache("etag1", "sha1", {"version": 3, "a": 1})
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["sha"] == "sha1"
+    assert [p for p in tmp_path.iterdir() if p != cache_path] == []
+
+    engine._save_cache("etag2", "sha2", {"version": 3, "a": 2})
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["sha"] == "sha2"
+    assert [p for p in tmp_path.iterdir() if p != cache_path] == []
+
+
+def test_save_cache_swaps_in_with_os_replace(tmp_path, monkeypatch):
+    calls = []
+    real_replace = gh.os.replace
+
+    def spy(src, dst):
+        calls.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(gh.os, "replace", spy)
+    store = gh.GitHubStore(owner="me", repo="focus-data", token="t", api="http://127.0.0.1:1")
+    engine = gh.SyncEngine(store, tmp_path / "cache.json")
+    engine._save_cache("e", "s", {"version": 3})
+    assert len(calls) == 1
+    assert str(calls[0][1]).endswith("cache.json")
+
+
+def test_get_file_oversized_raises_plain_github_error(fake):
+    store = make_store(fake)
+    store.put_file("state.json", '{"n": 1}', None, "seed")
+    fake.force_oversized("state.json")
+    with pytest.raises(gh.GitHubError) as exc:
+        store.get_file("state.json")
+    assert not isinstance(exc.value, (gh.Conflict, gh.AuthError, gh.Offline, gh.RateLimited))
+
+
+def test_sync_reports_error_and_never_pushes_when_remote_content_is_unusable(fake, tmp_path):
+    store = make_store(fake)
+    store.put_file("state.json", json.dumps(fc.migrate_doc({"version": 3, "plan": {"tasks": []}})),
+                    None, "seed")
+    fake.force_oversized("state.json")
+    before = dict(fake.files["state.json"])
+    engine = gh.SyncEngine(store, tmp_path / "cache.json")
+
+    result = engine.sync(doc_with_task("Alpha"))
+
+    assert result.status == "error"
+    assert result.pushed is False
+    assert fake.files["state.json"] == before
+
+
+def test_remote_changed_false_when_remote_content_is_unchanged_across_full_fetches(fake, tmp_path):
+    store = make_store(fake)
+    # A "raw" remote doc missing most of the fields migrate_doc fills in with defaults, so a sloppy
+    # comparison (raw vs. migrated) would wrongly see this as "changed" on a later, identical fetch.
+    minimal_remote = {"version": 3, "plan": {"tasks": []}}
+    store.put_file("state.json", json.dumps(minimal_remote), None, "seed minimal")
+    local_doc = fc.migrate_doc(minimal_remote)
+    cache_path = tmp_path / "cache.json"
+    engine = gh.SyncEngine(store, cache_path)
+
+    first = engine.sync(local_doc)
+    assert first.pushed is False  # local already matches the (migrated) remote; nothing to push
+
+    # Force a full 200 GET next time instead of a 304, as if the cached ETag had gone stale.
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    cache["etag"] = '"not-the-real-etag"'
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+
+    second = engine.sync(local_doc)
+    assert second.remote_changed is False
