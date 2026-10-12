@@ -4,7 +4,8 @@
 import {
   EPOCH, WEEKDAY_KEYS, newId, clone, zonedParts, displaySections, reorderRanked, isActive, isDated,
   nextActiveDay, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
-  timerResume, timerAddMinutes, timerSkip, roundHalfEven, addFolder, weekday, taskDate,
+  timerResume, timerAddMinutes, timerSkip, roundHalfEven, addFolder, weekday, taskDate, deepEqual,
+  emptyDoc, normalizeDoc, VersionError, STATE_VERSION,
 } from "./core.js";
 
 export const TIME_PRESETS = [5, 10, 15, 25, 30, 45, 60, 90];
@@ -359,4 +360,84 @@ export function stampToLocalHm(stamp, tz) {
   const ms = Date.parse(stamp || "");
   if (!Number.isFinite(ms)) return "";
   return zonedParts(new Date(ms), tz).hhmm;
+}
+
+// ---------------------------------------------------------------- safety helpers for the page
+
+/** The ?api= test-server override from a URL query string. Only a local server is accepted
+ * (http://127.0.0.1:<port> or http://localhost:<port>), so a crafted link cannot send the token elsewhere.
+ * Returns the origin, or null. */
+export function parseApiOverride(search) {
+  let v;
+  try {
+    v = new URLSearchParams(search || "").get("api");
+  } catch {
+    return null;
+  }
+  if (!v) return null;
+  const m = /^http:\/\/(127\.0\.0\.1|localhost):(\d{1,5})\/?$/.exec(v.trim());
+  if (!m) return null;
+  const port = Number(m[2]);
+  if (port < 1 || port > 65535) return null;
+  return `http://${m[1]}:${port}`;
+}
+
+/** Read the list kept on this phone (the raw text of localStorage "focus.doc").
+ * Returns {doc, block, backup}: `doc` to show; `block` a message when the saved list must not be changed
+ * (it came from a newer app); `backup` = {key, text} to store before anything can replace the saved text. */
+export function readLocalDoc(text) {
+  if (!text) return { doc: emptyDoc(), block: null, backup: null };
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { doc: emptyDoc(), block: null, backup: { key: "focus.doc.backup-unreadable", text } };
+  }
+  try {
+    return { doc: normalizeDoc(raw), block: null, backup: null };
+  } catch (ex) {
+    if (ex instanceof VersionError && ex.version > STATE_VERSION) {
+      return {
+        doc: emptyDoc(),
+        block: "The list on this phone was saved by a newer Focus Tool. Reload this page to update the app. Nothing will be changed until then.",
+        backup: { key: "focus.doc.backup-newer", text },
+      };
+    }
+    return { doc: emptyDoc(), block: null, backup: { key: "focus.doc.backup-unreadable", text } };
+  }
+}
+
+/** Why Re-plan now should not ask GitHub to plan, given the result of the sync just before it.
+ * "" means the sync worked and the plan can be requested. */
+export function replanBlockMessage(result) {
+  if (result && result.status === "ok") return "";
+  const st = result ? result.status : "error";
+  if (st === "offline") return "You are offline, so the plan cannot be made now. Try again when you are back online.";
+  if (st === "auth") return "GitHub did not accept the token. Check it in Settings, then try again.";
+  if (st === "rate_limited") return "GitHub asked us to wait for a while. Try re-planning later.";
+  if (st === "version") return (result && result.message) || "The list on GitHub was saved by a different app version.";
+  if (st === "none") return "Connect GitHub in Settings first.";
+  return "Your list could not be saved to GitHub, so the plan was not requested. Try again in a moment.";
+}
+
+/** When the next automatic sync may run after a sync result (milliseconds since 1970). */
+export function syncPauseUntil(result, nowMs) {
+  if (result && result.status === "rate_limited") return nowMs + Math.max(1, Number(result.retryAfterS) || 60) * 1000;
+  return 0;
+}
+
+/** The editor fields the user actually changed: compares the form with the values when the sheet opened,
+ * so a change made on another device meanwhile (say a rename) is not undone by Save. */
+export function changedFields(original, form) {
+  const out = {};
+  for (const k of ["name", "estimate_min", "details", "deadline", "target", "folder", "repeat"]) {
+    const a = original[k] === undefined ? null : original[k];
+    const b = form[k] === undefined ? null : form[k];
+    if (!deepEqual(a, b)) out[k] = b;
+  }
+  if (out.repeat) {
+    out.deadline = null; // choosing a repeat removes the dates
+    out.target = null;
+  }
+  return out;
 }

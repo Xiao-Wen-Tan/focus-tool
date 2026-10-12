@@ -187,3 +187,59 @@ test("timeline segments follow the plan day's working windows", () => {
   assert.equal(segs[1].blocks[0].len, 270);
   assert.equal(L.stampToLocalHm("2026-10-13T00:07:00.000Z", "America/Chicago"), "19:07");
 });
+
+// ---------------------------------------------------------------- fix round 1
+
+test("?api= accepts only a local test server", () => {
+  assert.equal(L.parseApiOverride("?api=http://127.0.0.1:8765"), "http://127.0.0.1:8765");
+  assert.equal(L.parseApiOverride("?api=http://localhost:8765/"), "http://localhost:8765");
+  for (const bad of [
+    "?api=https://evil.example", "?api=http://127.0.0.1", "?api=http://127.0.0.1:8765/steal",
+    "?api=http://127.0.0.1.evil.example:80", "?api=http://user@127.0.0.1:80", "?api=https://127.0.0.1:8765",
+    "?api=http://localhost:0", "?api=http://localhost:70000", "?api=javascript:alert(1)", "", "?x=1",
+  ]) assert.equal(L.parseApiOverride(bad), null, bad);
+});
+
+test("a newer list kept on the phone is blocked and backed up, never replaced", () => {
+  const text = JSON.stringify({ version: 4, plan: { tasks: [{ id: "a", name: "Alpha" }] } });
+  const r = L.readLocalDoc(text);
+  assert.match(r.block, /newer Focus Tool/);
+  assert.deepEqual(r.backup, { key: "focus.doc.backup-newer", text });
+  assert.deepEqual(r.doc.plan.tasks, []);
+  const ok = L.readLocalDoc(JSON.stringify(doc([task("a", "Alpha")])));
+  assert.equal(ok.block, null);
+  assert.equal(ok.backup, null);
+  assert.deepEqual(names(ok.doc), ["Alpha"]);
+  const broken = L.readLocalDoc("{not json");
+  assert.equal(broken.block, null);
+  assert.equal(broken.backup.key, "focus.doc.backup-unreadable");
+  assert.equal(L.readLocalDoc(null).block, null);
+});
+
+test("Re-plan now asks GitHub only after a sync that worked", () => {
+  assert.equal(L.replanBlockMessage({ status: "ok" }), "");
+  assert.match(L.replanBlockMessage({ status: "offline" }), /offline/);
+  assert.match(L.replanBlockMessage({ status: "auth" }), /token/);
+  assert.match(L.replanBlockMessage({ status: "rate_limited" }), /wait/);
+  assert.match(L.replanBlockMessage({ status: "error", message: "boom" }), /could not be saved/);
+  assert.match(L.replanBlockMessage(null), /could not be saved/);
+});
+
+test("after rate_limited the next automatic sync waits retryAfterS", () => {
+  assert.equal(L.syncPauseUntil({ status: "rate_limited", retryAfterS: 90 }, 1000), 91000);
+  assert.equal(L.syncPauseUntil({ status: "rate_limited" }, 1000), 61000);
+  assert.equal(L.syncPauseUntil({ status: "ok" }, 1000), 0);
+});
+
+test("editor Save sends only the fields the user changed", () => {
+  const opened = { name: "Alpha", estimate_min: 25, details: "", deadline: null, target: null, folder: null, repeat: null };
+  assert.deepEqual(L.changedFields(opened, { ...opened }), {});
+  assert.deepEqual(L.changedFields(opened, { ...opened, estimate_min: 45 }), { estimate_min: 45 });
+  assert.deepEqual(L.changedFields(opened, { ...opened, repeat: { kind: "daily" } }), { repeat: { kind: "daily" }, deadline: null, target: null });
+  // A rename made on another device while the sheet was open survives a Save that changed only minutes.
+  const d = doc([task("a", "Alpha", { estimate_min: 25 })]);
+  L.findTask(d, "a").name = "Alpha renamed on desktop";
+  L.updateTask(d, "a", L.changedFields(opened, { ...opened, estimate_min: 45 }));
+  assert.equal(L.findTask(d, "a").name, "Alpha renamed on desktop");
+  assert.equal(L.findTask(d, "a").estimate_min, 45);
+});

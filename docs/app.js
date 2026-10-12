@@ -1,7 +1,7 @@
 // The phone web app: five tabs (Now, List, Done, Plan, Settings) over the same list the desktop uses.
 // Page code only; the rules live in core.js (shared with the desktop) and logic.js (button actions).
 import {
-  canonical, clone, emptyDoc, normalizeDoc, mergeDocs, stampChanges, nowIso, displaySections, inFolder,
+  canonical, clone, mergeDocs, stampChanges, nowIso, displaySections, inFolder,
   folderTree, isActive, renameFolder, deleteFolder, addFolder, timerView, WEEKDAY_KEYS, addDays,
 } from "./core.js";
 import { GitHubStore, SyncEngine, fetchDayPlan } from "./store.js";
@@ -9,7 +9,8 @@ import {
   TIME_PRESETS, DEFAULT_MINUTES, ADD_MINUTES_STEP, CELEBRATE_MS, localNow, findTask, timerTask, mmss, mins,
   dateLabel, rowLabel, repeatLabel, sleepText, mascot, upNext, addTask, updateTask, startTask, toggleRun,
   addMinutes, finishTaskNow, removeTask, putBack, clearDone, moveRanked, moveRankedToTop, setWindows,
-  windowsText, timelineSegments, minToHm, stampToLocalHm,
+  windowsText, timelineSegments, minToHm, stampToLocalHm, parseApiOverride, readLocalDoc, replanBlockMessage,
+  syncPauseUntil, changedFields,
 } from "./logic.js";
 
 const APP_VERSION = "2.0.0";
@@ -57,34 +58,38 @@ const app = {
   store: null,
   dayPlan: load(KEY_PLAN, null),
   sync: { status: "idle", message: "", at: null },
-  blocked: null, // a message when the file on GitHub cannot be used (wrong version)
+  blocked: null, // a message when the file on GitHub cannot be used (wrong version); "Sync now" retries
+  localBlock: null, // a message when the list kept on this phone came from a newer app; only an update clears it
   syncing: false,
+  syncPromise: null,
   syncAgain: false,
   syncTimer: null,
+  pauseUntil: 0, // after "rate limited": no automatic sync before this time (ms)
   celebrateUntil: 0,
   asking: false, // "time is up" message showing
   planBusy: "",
+  planNote: "", // why the last Re-plan now did not ask GitHub
   api: null,
 };
 
-function apiOverride() {
-  try {
-    const v = new URLSearchParams(location.search).get("api");
-    return v ? v.replace(/\/+$/, "") : null;
-  } catch {
-    return null;
-  }
+function blockedText() {
+  return app.localBlock || app.blocked;
 }
 
 function loadDoc() {
-  const raw = load(KEY_DOC, null);
-  if (!raw) return emptyDoc();
+  let text = null;
   try {
-    return normalizeDoc(raw);
-  } catch (ex) {
-    app.blocked = ex.message;
-    return emptyDoc();
+    text = localStorage.getItem(KEY_DOC);
+  } catch { /* storage blocked */ }
+  const r = readLocalDoc(text);
+  if (r.backup) {
+    // Keep the saved text before anything can replace it. An existing backup is never overwritten.
+    try {
+      if (!localStorage.getItem(r.backup.key)) localStorage.setItem(r.backup.key, r.backup.text);
+    } catch { /* storage blocked: the block below still stops any write */ }
   }
+  app.localBlock = r.block;
+  return r.doc;
 }
 
 function now() {
@@ -109,8 +114,8 @@ function makeEngine() {
 
 /** Apply `fn` to a copy of the list, stamp what changed, keep it on the phone, and send it soon. */
 function commit(fn) {
-  if (app.blocked) {
-    toast(app.blocked);
+  if (blockedText()) {
+    toast(blockedText());
     return undefined;
   }
   const next = clone(app.doc);
@@ -128,20 +133,41 @@ function commit(fn) {
 function scheduleSync(ms) {
   if (!app.engine) return;
   clearTimeout(app.syncTimer);
-  app.syncTimer = setTimeout(runSync, ms);
+  app.syncTimer = setTimeout(() => runSync(), ms);
 }
 
-async function runSync() {
-  if (!app.engine || app.blocked) return null;
-  if (app.syncing) {
+/** One sync with GitHub. Always resolves to a result {status, message, ...}.
+ * If a sync is already running, this waits for it and asks for one more afterwards.
+ * `force` (a button press) skips the wait after GitHub said "rate limited"; automatic syncs respect it. */
+function runSync({ force = false } = {}) {
+  if (app.syncPromise) {
     app.syncAgain = true;
-    return null;
+    return app.syncPromise;
+  }
+  if (!app.engine) return Promise.resolve({ status: "none", message: "Not connected to GitHub." });
+  if (blockedText()) return Promise.resolve({ status: "version", message: blockedText() });
+  if (!force && Date.now() < app.pauseUntil) {
+    // Keep exactly one automatic retry, at the time GitHub gave us.
+    clearTimeout(app.syncTimer);
+    app.syncTimer = setTimeout(() => runSync(), Math.min(app.pauseUntil - Date.now() + 50, 3600000));
+    return Promise.resolve({ status: "rate_limited", message: "Waiting, because GitHub asked us to slow down.", retryAfterS: (app.pauseUntil - Date.now()) / 1000 });
   }
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     app.sync = { status: "offline", message: "Offline. Your changes are kept on this phone.", at: app.sync.at };
     renderStatus();
-    return null;
+    return Promise.resolve({ status: "offline", message: app.sync.message });
   }
+  app.syncPromise = doSync().finally(() => {
+    app.syncPromise = null;
+    if (app.syncAgain) {
+      app.syncAgain = false;
+      scheduleSync(300);
+    }
+  });
+  return app.syncPromise;
+}
+
+async function doSync() {
   app.syncing = true;
   renderStatus();
   const sent = canonical(app.doc);
@@ -152,6 +178,7 @@ async function runSync() {
     r = { status: "error", message: (ex && ex.message) || String(ex), doc: app.doc, remoteChanged: false };
   }
   app.syncing = false;
+  app.pauseUntil = syncPauseUntil(r, Date.now());
   if (r.status === "ok") {
     const before = canonical(app.doc);
     if (before === sent) {
@@ -168,19 +195,15 @@ async function runSync() {
   } else {
     if (r.status === "version") app.blocked = r.message;
     app.sync = { status: r.status, message: r.message, at: app.sync.at };
-    if (r.status === "rate_limited" && r.retryAfterS) scheduleSync(Math.min(r.retryAfterS, 3600) * 1000);
+    if (r.status === "rate_limited") scheduleSync(Math.min(app.pauseUntil - Date.now(), 3600000));
   }
   renderStatus();
-  if (app.blocked) render();
-  if (app.syncAgain) {
-    app.syncAgain = false;
-    scheduleSync(300);
-  }
+  if (blockedText()) render();
   return r;
 }
 
 async function refreshDayPlan() {
-  if (!app.store || app.blocked) return;
+  if (!app.store || blockedText()) return;
   try {
     const p = await fetchDayPlan(app.store);
     if (canonical(p) !== canonical(app.dayPlan)) {
@@ -266,7 +289,7 @@ function renderTabs() {
 }
 
 function statusText() {
-  if (app.blocked) return { cls: "bad", text: app.blocked };
+  if (blockedText()) return { cls: "bad", text: blockedText() };
   if (!connected()) return { cls: "dim", text: "On this phone only. Connect GitHub in Settings to share with the desktop." };
   if (app.syncing) return { cls: "dim", text: "Syncing..." };
   const dirty = app.engine && app.engine.dirty;
@@ -551,6 +574,8 @@ function openEditor(id) {
     folder: app.ui.folder || null, repeat: null,
   };
   const form = { ...t, repeat: t.repeat ? clone(t.repeat) : null };
+  const opened = clone({ name: t.name, estimate_min: t.estimate_min, details: t.details, deadline: t.deadline,
+    target: t.target, folder: t.folder, repeat: t.repeat }); // to save only what the user changed
 
   const name = h("input", { type: "text", class: "input", placeholder: "What is the task?", value: form.name, enterkeyhint: "done", "aria-label": "Task name" });
   name.addEventListener("input", () => { form.name = name.value; });
@@ -679,7 +704,8 @@ function openEditor(id) {
       closeSheet();
       return false;
     }
-    commit((d) => updateTask(d, id, f));
+    const changed = changedFields(opened, f);
+    if (Object.keys(changed).length) commit((d) => updateTask(d, id, changed));
     return true;
   };
 
@@ -754,7 +780,7 @@ function viewPlan() {
   const p = app.dayPlan;
   const out = h("div", { class: "plan" });
   const replan = btn("Re-plan now", replanNow, "primary", { disabled: !connected() || Boolean(app.planBusy) || null });
-  const head = h("div", { class: "plan-head" }, replan, app.planBusy ? h("p", { class: "hint" }, app.planBusy) : null);
+  const head = h("div", { class: "plan-head" }, replan, app.planBusy ? h("p", { class: "hint" }, app.planBusy) : app.planNote ? h("p", { class: "status warn" }, app.planNote) : null);
   if (!connected()) {
     out.append(card("Plan", h("p", { class: "hint" }, "Connect GitHub in Settings to see the day plan the nightly job makes.")));
     return out;
@@ -818,11 +844,21 @@ function viewPlan() {
 async function replanNow() {
   if (!app.store || app.planBusy) return;
   const before = app.dayPlan && app.dayPlan.generated_at;
+  app.planNote = "";
   const setBusy = (t) => { app.planBusy = t; if (app.ui.tab === "plan") render(); };
   try {
     setBusy("Saving your list...");
-    await runSync();
-    if (app.blocked) throw new Error(app.blocked);
+    // Wait for a sync that is already running, then run a fresh one that includes every edit so far.
+    while (app.syncPromise) {
+      try { await app.syncPromise; } catch { /* its result does not matter here */ }
+    }
+    const r = await runSync({ force: true });
+    const why = replanBlockMessage(r);
+    if (why) {
+      app.planNote = why;
+      setBusy("");
+      return;
+    }
     setBusy("Asking GitHub to re-plan. This usually takes about a minute.");
     await app.store.dispatch("replan.yml", app.settings.branch || "main", { mode: "now" });
     const t0 = Date.now();
@@ -876,11 +912,11 @@ function viewSettings() {
           app.dayPlan = null;
           save(KEY_PLAN, null);
         }
-        app.blocked = null;
+        app.blocked = null; // a newer list kept on this phone (app.localBlock) stays blocked
         makeEngine();
         if (app.engine) app.engine.setDirty(true);
         result.textContent = connected() ? "Saved. Syncing now." : "Saved. Fill in owner, repository and token to sync.";
-        runSync().then(() => refreshDayPlan());
+        runSync({ force: true }).then(() => refreshDayPlan());
       }, "primary"),
       btn("Test connection", async () => {
         const v = read();
@@ -902,7 +938,7 @@ function viewSettings() {
   // Sync status
   out.append(card("Sync status",
     h("p", { "data-status": "", class: "status" }),
-    h("div", { class: "btn-row" }, btn("Sync now", () => { app.blocked = null; runSync().then(() => refreshDayPlan()); }, "", { disabled: !connected() || null }))));
+    h("div", { class: "btn-row" }, btn("Sync now", () => { app.blocked = null; runSync({ force: true }).then(() => refreshDayPlan()); }, "", { disabled: !connected() || null }))));
 
   // Working hours
   const inputs = {};
@@ -972,7 +1008,7 @@ function viewSettings() {
 // ---------------------------------------------------------------- start up
 
 function start() {
-  app.api = apiOverride();
+  app.api = parseApiOverride(location.search);
   app.doc = loadDoc();
   app.lastSaved = app.doc;
   makeEngine();
