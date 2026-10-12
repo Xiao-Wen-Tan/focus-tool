@@ -1,4 +1,4 @@
-"""Focus Tool v1.5: a small always-on-top time-visibility widget for Windows.
+"""Focus Tool v2, a small always-on-top time-visibility widget for Windows.
 
 Run from source:  python focus_tool.py
 Build an exe:     .\\build.ps1
@@ -6,24 +6,26 @@ Build an exe:     .\\build.ps1
 All the timer/plan logic lives in focus_core.py (tested). This file is only
 the window, the task panel, the tray icon, the hotkey, sounds and file plumbing.
 
-Data (v1.5): the task list, completed list, timer, thoughts, log and settings live
-in focus-tool\\data inside Box, so every computer that runs the app from Box shares
+The task list, completed list, timer, log and settings live in
+focus-tool\\data inside Box, so every computer that runs the app from Box shares
 them. Each computer re-reads that folder every few seconds to pick up the other
 computer's changes, and writes it only when you change something, so an idle
 computer never writes an old list over a newer one. The window position stays on
-each computer, in %APPDATA%\\FocusTool\\local.json.
+each computer, in %APPDATA%\\FocusTool\\local.json. state.json is version 3: every
+task has an id, and each change carries a time stamp so two copies can be merged.
 
-Model: plan.tasks holds the tasks still to do, in the order you chose.
-FocusWidget.active is the task the timer runs on; it can sit anywhere in the
-list (v1.4 dropped pinning it to the top). You pick which task to start;
-starting another one pauses the task on the timer and keeps its time in
-Task.spent_s, so it continues where it stopped when you start it again. Done
-moves a task to the completed list (kept in state.json) and logs it. Nothing
-starts on its own; when time is up the timer keeps counting and the widget
-asks for more time.
+plan.tasks holds the tasks still to do, in the order you chose. Tasks with
+a deadline or an "aim to finish by" date show first, earliest date first; the rest
+follow your order. A repeating task stays in the list and sleeps after Done until
+its next day. FocusWidget.active is the task the timer runs on. You pick which task
+to start; starting another one pauses the task on the timer and keeps its time in
+Task.spent_s, so it continues where it stopped when you start it again. Done moves
+a task to the completed list (kept in state.json) and logs it. Nothing starts on
+its own; when time is up the timer keeps counting and the widget asks for more time.
 """
 from __future__ import annotations
 
+import copy
 import csv
 import ctypes
 import ctypes.wintypes as wt
@@ -33,17 +35,21 @@ import shutil
 import sys
 import time
 import winsound
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF,
-                            Qt, QTimer, Property, Signal)
+from PySide6.QtCore import (QAbstractNativeEventFilter, QDate, QEasingCurve, QPoint, QPropertyAnimation, QRect,
+                            QRectF, Qt, QTimer, Property, Signal)
 from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit,
-                               QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
+                               QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+                               QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import focus_core as fc
+
+# The tests replace this module's `datetime` with a clock that only has now(), so this file only ever
+# calls datetime.now(). Dates come from `date`, and change stamps from fc.now_iso().
 
 APP_NAME = "FocusTool"
 CHECK_EVERY_MS = 250
@@ -54,6 +60,12 @@ TIME_PRESETS = (5, 10, 15, 25, 30, 45, 60, 90)
 MINI_SIZE = 64            # the shrunk widget is a circle this many pixels wide
 DETAILS_DEFAULT_H = 140   # starting height of the details box in the task panel
 DETAILS_MIN_H = 60
+NEWER_FILE_MESSAGE = "Your list was saved by a newer Focus Tool. Please update this app."
+REPEAT_CHOICES = ("Never", "Every day", "Weekdays", "Chosen days", "Every N days")
+REPEAT_KINDS = (None, "daily", "weekdays", "days", "every")
+DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+NEW_FOLDER = "\x00new folder"        # item data of the editor's "New folder..." choice
+NEW_SUBFOLDER = "\x00new subfolder"  # item data of the editor's "New subfolder..." choice
 
 
 # ---------------------------------------------------------------- paths & settings
@@ -72,7 +84,7 @@ def app_home() -> Path:
 
 
 def shared_dir() -> Path:
-    """Tasks, completed list, timer, thoughts, log and settings: one copy that Box syncs to every computer.
+    """The folder with the tasks, completed list, timer, log and settings, one copy that Box syncs to every computer.
     FOCUSTOOL_DATA points it somewhere else (the tests use this)."""
     d = Path(os.environ.get("FOCUSTOOL_DATA") or app_home() / "data")
     d.mkdir(parents=True, exist_ok=True)
@@ -112,24 +124,36 @@ def _write_json(path: Path, d: dict) -> None:
 def merge_old_local_data(local: Path, shared: Path) -> dict | None:
     """Fold this computer's files from before v1.5 into the shared Box folder. Runs once per computer.
 
-    The first computer copies its list over; a later one adds only the tasks, completed tasks, thoughts
-    and log rows the shared folder does not have yet. The old files are left as they are, as a backup.
+    The first computer copies its list over; a later one adds only the tasks, completed tasks and log
+    rows the shared folder does not have yet. The old files are left as they are, as a backup.
     Returns the old window position. Raises ValueError if the shared list exists but cannot be read
-    yet (Box still syncing it), so nothing is written and the merge runs again at the next start.
+    yet (Box still syncing it) or was saved by a newer app, so nothing is written and the merge runs
+    again at the next start.
     """
     old_path = local / "state.json"
     if not old_path.exists():
         return None
     old = fc.load_state(old_path)
+    old_geometry = old.geometry
     new_path = shared / "state.json"
-    merged = fc.merge_states(fc.parse_state(new_path.read_text(encoding="utf-8")), old) if new_path.exists() else old
-    fc.save_state(new_path, merged.plan, merged.current_index, merged.timer, done=merged.done)
-    for name in ("dump.txt", "log.csv"):
-        src, dst = local / name, shared / name
-        if src.exists():
-            have = dst.read_text(encoding="utf-8") if dst.exists() else ""
-            dst.write_text(fc.merge_lines(have, src.read_text(encoding="utf-8")), encoding="utf-8")
-    return old.geometry
+    prev = None
+    if new_path.exists():
+        have = fc.parse_state(new_path.read_text(encoding="utf-8"))
+        prev = fc.state_to_doc(have)
+        merged = fc.merge_states(have, old)
+        # merge_states builds a plain State; keep the shared file's tombstones, folders and planner block.
+        merged.deleted, merged.order_updated_at, merged.planner = have.deleted, have.order_updated_at, have.planner
+        merged.folders, merged.folders_updated_at = have.folders, have.folders_updated_at
+    else:
+        merged = old
+    merged.geometry = None
+    doc = fc.stamp_changes(prev, fc.state_to_doc(merged), fc.now_iso())
+    fc.save_state_obj(new_path, fc.doc_to_state(doc))
+    src, dst = local / "log.csv", shared / "log.csv"
+    if src.exists():
+        have_log = dst.read_text(encoding="utf-8") if dst.exists() else ""
+        dst.write_text(fc.merge_lines(have_log, src.read_text(encoding="utf-8")), encoding="utf-8")
+    return old_geometry
 
 
 def load_settings() -> dict:
@@ -226,6 +250,9 @@ def panel_stylesheet(c: dict) -> str:
     QLabel#hint {{ color: {c['text_dim']}; font-size: 9pt; }}
     QListWidget, QPlainTextEdit, QLineEdit {{
         background: {c['background']}; border: 1px solid {c['border']}; border-radius: 10px; padding: 6px; }}
+    QComboBox, QDateEdit, QSpinBox, QFrame#card QComboBox, QFrame#card QDateEdit, QFrame#card QSpinBox {{
+        background: {c['background']}; border: 1px solid {c['border']}; border-radius: 8px; padding: 3px 8px; }}
+    QComboBox:disabled, QDateEdit:disabled, QFrame#card QDateEdit:disabled {{ color: {c['text_dim']}; }}
     QFrame#card QWidget#grip {{ background: {c['border']}; border-radius: 3px; }}
     QFrame#card QWidget#grip:hover {{ background: {c['button_hover']}; }}
     QListWidget::item {{ padding: 6px 8px; border-radius: 8px; }}
@@ -332,28 +359,109 @@ class DragHandle(QWidget):
         self._start = None
 
 
-class DumpDialog(QDialog):
-    def __init__(self, parent, colors: dict):
-        super().__init__(parent)
-        self.setWindowTitle("Dump a thought")
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.setStyleSheet(panel_stylesheet(colors))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.addWidget(QLabel("Write it down, then back to the task. Enter to save."))
-        self.edit = QLineEdit()
-        self.edit.setMinimumWidth(440)
-        self.edit.returnPressed.connect(self.accept)
-        layout.addWidget(self.edit)
+def _qdate(d: date) -> QDate:
+    return QDate(d.year, d.month, d.day)
 
-    def text(self) -> str:
-        return self.edit.text().strip()
+
+def _iso(q: QDate) -> str:
+    return f"{q.year():04d}-{q.month():02d}-{q.day():02d}"
+
+
+def short_date(iso: str) -> str:
+    """'2026-10-16' as 'Fri 10/16' (English day names whatever the Windows language is)."""
+    d = date.fromisoformat(iso)
+    return f"{DAY_LABELS[d.weekday()]} {d.month}/{d.day}"
+
+
+def first_date(t: fc.Task) -> str | None:
+    """The earlier of a task's deadline and aim-to-finish date; the dated list is sorted by it."""
+    dates = [x for x in (t.deadline, t.target) if x]
+    return min(dates) if dates else None
+
+
+def clean_folder(text: str | None) -> str | None:
+    """A folder path typed by hand, tidied, so 'Paper / Theory/' becomes 'Paper/Theory'. Empty text gives None."""
+    parts = [p.strip() for p in (text or "").split("/") if p.strip()]
+    return "/".join(parts) or None
+
+
+def folder_with_parents(path: str) -> list[str]:
+    """'A/B/C' gives ['A', 'A/B', 'A/B/C']."""
+    parts = path.split("/")
+    return ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
+
+
+class FoldersDialog(QDialog):
+    """Rename or delete folders. Tasks in a deleted folder stay on the list without a folder."""
+
+    def __init__(self, widget: "FocusWidget"):
+        super().__init__(widget.panel if widget.panel.isVisible() else None)
+        self.w = widget
+        self.setWindowTitle("Folders")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setStyleSheet(panel_stylesheet(widget.s["colors"]))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        hint = QLabel("Renaming a folder also renames its subfolders. Deleting one keeps its tasks on the list.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.list = QListWidget()
+        self.list.setMinimumSize(320, 200)
+        lay.addWidget(self.list)
+        row = QHBoxLayout()
+        for label, fn in (("Rename...", self.rename), ("Delete", self.delete)):
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, fn=fn: fn())
+            row.addWidget(b)
+        row.addStretch()
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(b_close)
+        lay.addLayout(row)
+        self.fill()
+
+    def fill(self):
+        self.list.clear()
+        for path, depth in fc.folder_tree(self.w.folders, self.w.plan.tasks):
+            item = QListWidgetItem("    " * depth + path.split("/")[-1])
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.list.addItem(item)
+
+    def _selected(self) -> str | None:
+        item = self.list.currentItem()
+        return item.data(Qt.UserRole) if item is not None else None
+
+    def rename(self):
+        path = self._selected()
+        if path is None:
+            return
+        text, ok = QInputDialog.getText(self, "Rename folder", "New name (a / makes it a subfolder):",
+                                        QLineEdit.Normal, path)
+        new = clean_folder(text) if ok else None
+        if new and new != path:
+            self.w.rename_folder(path, new)
+            self.fill()
+
+    def delete(self):
+        path = self._selected()
+        if path is None:
+            return
+        answer = QMessageBox.question(self, "Delete folder", f"Delete the folder '{path}' and its subfolders? "
+                                      "Their tasks stay on the list without a folder.")
+        if answer == QMessageBox.Yes:
+            self.w.delete_folder(path)
+            self.fill()
 
 
 # ---------------------------------------------------------------- task panel
 
+_KEEP = object()  # passed to TaskPanel.refresh to keep the current selection
+
+
 class TaskPanel(QWidget):
-    """One card to add or edit a task, the ordered list, the completed list, and dumped thoughts."""
+    """One card to add or edit a task, the dated list, the ranked list, and the completed list."""
 
     def __init__(self, widget: "FocusWidget"):
         super().__init__(None, Qt.Tool | Qt.WindowStaysOnTopHint)
@@ -364,6 +472,10 @@ class TaskPanel(QWidget):
         self.resize(int(widget.ui.get("panel_w", 560)), int(widget.ui.get("panel_h", 860)))
         self._updating = False
         self._editing = False  # False: the task card adds a new task. True: it edits the selected one.
+        self._folder_key: tuple | None = None  # the folder tree the two folder combos were last filled with
+        self._last_folder: str | None = None  # the editor's folder before "New folder..." was picked
+        self._editor_anchor: str | None = None  # start date of an "Every N days" repeat being edited
+        self._kept_repeat: dict | None = None  # a repeat rule this app does not know; kept unless changed here
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -391,6 +503,11 @@ class TaskPanel(QWidget):
         b_done.clicked.connect(self.done_selected)
         head.addWidget(b_done)
         root.addLayout(head)
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #B5523B; font-weight: 600;")
+        self.status_label.hide()
+        root.addWidget(self.status_label)
 
         # -- one card: add a new task, or edit the selected one
         task_card, tc = card("Add a task")
@@ -415,6 +532,45 @@ class TaskPanel(QWidget):
         grip = DragHandle(self.ed_details)
         grip.moved.connect(self._details_resized)
         tc.addWidget(grip)
+
+        # each date has a check box that turns it on; unchecked means no date
+        self.ed_deadline_on, self.ed_deadline = self._date_row(tc, "Deadline", "A hard date the task must be done by")
+        self.ed_target_on, self.ed_target = self._date_row(tc, "Aim to finish by",
+                                                           "The date you expect to finish. Not a hard limit.")
+        frow = QHBoxLayout()
+        frow.addWidget(self._row_label("Folder"))
+        self.ed_folder = QComboBox()
+        self.ed_folder.currentIndexChanged.connect(self._editor_folder_changed)
+        frow.addWidget(self.ed_folder, 1)
+        tc.addLayout(frow)
+        rrow = QHBoxLayout()
+        rrow.addWidget(self._row_label("Repeat"))
+        self.ed_repeat = QComboBox()
+        self.ed_repeat.addItems(list(REPEAT_CHOICES))
+        self.ed_repeat.currentIndexChanged.connect(self._repeat_changed)
+        rrow.addWidget(self.ed_repeat)
+        self.ed_every = QSpinBox()
+        self.ed_every.setRange(1, 365)
+        self.ed_every.setValue(2)
+        self.ed_every.setPrefix("every ")
+        self.ed_every.setSuffix(" days")
+        self.ed_every.valueChanged.connect(self._apply_editor)
+        rrow.addWidget(self.ed_every)
+        rrow.addStretch()
+        tc.addLayout(rrow)
+        self.days_row = QWidget()
+        drow = QHBoxLayout(self.days_row)
+        drow.setContentsMargins(0, 0, 0, 0)
+        drow.setSpacing(6)
+        self.ed_days: list[QCheckBox] = []
+        for label in DAY_LABELS:
+            cb = QCheckBox(label)
+            cb.toggled.connect(self._apply_editor)
+            self.ed_days.append(cb)
+            drow.addWidget(cb)
+        drow.addStretch()
+        tc.addWidget(self.days_row)
+
         trow = QHBoxLayout()
         trow.addStretch()
         self.b_new = QPushButton("+ New task")
@@ -428,14 +584,36 @@ class TaskPanel(QWidget):
         tc.addLayout(trow)
         root.addWidget(task_card)
 
-        # -- the list
-        list_card, lst = card("Your list, in order", "Click a task to select it: edit it above, Start it, or mark it "
-                                                      "Done. Drag to reorder, or use the arrows.")
+        # -- which folder to show
+        show = QHBoxLayout()
+        show.addWidget(QLabel("Show"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.setToolTip("Show one folder and its subfolders, or all tasks")
+        self.filter_combo.currentIndexChanged.connect(self._filter_changed)
+        show.addWidget(self.filter_combo, 1)
+        b_folders = QPushButton("Folders...")
+        b_folders.setToolTip("Rename or delete folders")
+        b_folders.clicked.connect(lambda: self.w.open_folders())
+        show.addWidget(b_folders)
+        root.addLayout(show)
+
+        # -- tasks with a date, earliest first
+        self.dated_card, dl = card("📅 By date", "Tasks with a deadline or a date to aim for, earliest first. "
+                                                "Their dates set the order, so they cannot be dragged.")
+        self.dated_list = QListWidget()
+        self.dated_list.setMinimumHeight(80)
+        self.dated_list.currentRowChanged.connect(lambda r: self._selection_changed(self.dated_list, r))
+        dl.addWidget(self.dated_list)
+        root.addWidget(self.dated_card)
+
+        # -- the ranked list
+        list_card, lst = card("Your list, in order", "Click a task to edit it above, Start it, or mark it Done. "
+                                                      "Drag to reorder, or use the arrows.")
         self.list = QListWidget()
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
         self.list.setDefaultDropAction(Qt.MoveAction)
         self.list.setMinimumHeight(150)
-        self.list.currentRowChanged.connect(self._load_editor)
+        self.list.currentRowChanged.connect(lambda r: self._selection_changed(self.list, r))
         self.list.model().rowsMoved.connect(self._rows_moved)
         lst.addWidget(self.list)
         lrow = QHBoxLayout()
@@ -455,40 +633,53 @@ class TaskPanel(QWidget):
         self.done_list = QListWidget()
         self.done_list.setMinimumHeight(90)
         dn.addWidget(self.done_list)
-        drow = QHBoxLayout()
+        drow2 = QHBoxLayout()
         b_back = QPushButton("↩ Put back in list")
         b_back.clicked.connect(self.put_back)
-        drow.addWidget(b_back)
-        drow.addStretch()
+        drow2.addWidget(b_back)
+        drow2.addStretch()
         b_clear = QPushButton("Clear completed")
         b_clear.setObjectName("quiet")
         b_clear.setToolTip("Empties this card. The record stays in log.csv.")
         b_clear.clicked.connect(self.clear_done)
-        drow.addWidget(b_clear)
-        dn.addLayout(drow)
+        drow2.addWidget(b_clear)
+        dn.addLayout(drow2)
         root.addWidget(done_card)
-
-        # -- thoughts
-        th_card, th = card("💭 Dumped thoughts", "Everything you typed with the thought button. Turn one into a task, or let it go.")
-        self.dumps = QListWidget()
-        self.dumps.setMinimumHeight(90)
-        th.addWidget(self.dumps)
-        throw = QHBoxLayout()
-        b1 = QPushButton("→ Make it a task")
-        b1.clicked.connect(self.dump_to_task)
-        b2 = QPushButton("Delete")
-        b2.clicked.connect(self.delete_dump)
-        b3 = QPushButton("Open dump.txt")
-        b3.setObjectName("quiet")
-        b3.clicked.connect(lambda: os.startfile(str(self.w.dump_path)) if self.w.dump_path.exists() else None)
-        throw.addWidget(b1)
-        throw.addWidget(b2)
-        throw.addStretch()
-        throw.addWidget(b3)
-        th.addLayout(throw)
-        root.addWidget(th_card)
         root.addStretch()
+        self._fill_folder_combos()
         self._set_mode(editing=False, clear=True)
+        self.dated_card.setVisible(False)
+        self.show_status(widget.status_message)
+
+    # -- small builders
+    @staticmethod
+    def _row_label(text: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setMinimumWidth(110)
+        return lab
+
+    def _date_row(self, lay: QVBoxLayout, text: str, tip: str) -> tuple[QCheckBox, QDateEdit]:
+        row = QHBoxLayout()
+        on = QCheckBox(text)
+        on.setToolTip(tip)
+        on.setMinimumWidth(110)
+        edit = QDateEdit()
+        edit.setCalendarPopup(True)
+        edit.setDisplayFormat("ddd M/d/yyyy")
+        edit.setDate(_qdate(self.w.today()))
+        edit.setEnabled(False)
+        on.toggled.connect(self._date_toggled)
+        edit.dateChanged.connect(self._apply_editor)
+        row.addWidget(on)
+        row.addWidget(edit)
+        row.addStretch()
+        lay.addLayout(row)
+        return on, edit
+
+    def show_status(self, message: str):
+        """A warning under the header, such as a list saved by a newer version of the app."""
+        self.status_label.setText(message)
+        self.status_label.setVisible(bool(message))
 
     # -- refresh from model
     def showEvent(self, e):
@@ -502,41 +693,133 @@ class TaskPanel(QWidget):
     def _details_resized(self, h: int):
         self.w.ui["details_h"] = h
 
-    def _label(self, t: fc.Task) -> str:
+    def _label(self, t: fc.Task, dated: bool = False, show_folder: bool = False) -> str:
         if t is self.w.active and self.w.timer.running:
-            return ("⏸ " if self.w.timer.paused else "▶ ") + task_label(t)
-        return ("⏸ " if t.spent_s else "") + task_label(t)  # paused to start another task
+            text = ("⏸ " if self.w.timer.paused else "▶ ") + task_label(t)
+        else:
+            text = ("⏸ " if t.spent_s else "") + task_label(t)  # paused to start another task
+        if dated and first_date(t):
+            text = f"📅 {short_date(first_date(t))} · {text}"
+        elif t.repeat:
+            text = "🔁 " + text
+        if show_folder and t.folder:
+            text += f"   📁 {t.folder}"
+        return text
+
+    def filter_path(self) -> str | None:
+        """The folder the lists are filtered to, or None for all tasks."""
+        return self.filter_combo.currentData() or None
+
+    def _task_by_id(self, task_id) -> fc.Task | None:
+        return next((t for t in self.w.plan.tasks if t.id == task_id), None)
 
     def selected_task(self) -> fc.Task | None:
-        row = self.list.currentRow()
-        return self.w.plan.tasks[row] if 0 <= row < len(self.w.plan.tasks) else None
+        for lst in (self.dated_list, self.list):
+            item = lst.currentItem()
+            if item is not None and lst.currentRow() >= 0:
+                return self._task_by_id(item.data(Qt.UserRole))
+        return None
 
-    def refresh(self, select: int | None = None):
-        """Rebuild the lists. `select` picks a row (-1 for none); None keeps the current selection."""
+    def _selection_changed(self, lst: QListWidget, row: int):
+        """Selecting in one list clears the other, so only one task is ever selected."""
+        if self._updating:
+            return
+        if row >= 0:
+            other = self.dated_list if lst is self.list else self.list
+            self._updating = True
+            other.setCurrentRow(-1)
+            self._updating = False
+        self._load_editor()
+
+    def refresh(self, select=_KEEP):
+        """Rebuild the lists. `select` is the id of the task to select (None for none); by default the
+        selection stays on the same task."""
+        t = self.selected_task()
+        sel = (t.id if t is not None else None) if select is _KEEP else select
         self._updating = True
-        cur = select if select is not None else self.list.currentRow()
-        self.list.clear()
-        for i, t in enumerate(self.w.plan.tasks):
-            item = QListWidgetItem(self._label(t))
-            item.setData(Qt.UserRole, i)  # position before any drag, used by _rows_moved
-            if t.details.strip():
-                item.setToolTip(t.details)
-            self.list.addItem(item)
-        if self.w.plan.tasks and cur >= 0:
-            self.list.setCurrentRow(min(cur, len(self.w.plan.tasks) - 1))
-        else:
-            self.list.setCurrentRow(-1)
+        self._fill_folder_combos()
+        path = self.filter_path()
+        dim = QColor(self.w.s["colors"]["text_dim"])
+        dated, ranked = fc.display_sections(self.w.plan.tasks)
+        for lst, tasks, is_dated in ((self.dated_list, dated, True), (self.list, ranked, False)):
+            lst.clear()
+            for t in tasks:
+                if not fc.in_folder(t, path):
+                    continue
+                item = QListWidgetItem(self._label(t, is_dated, show_folder=path is None))
+                item.setData(Qt.UserRole, t.id)
+                tips = [t.details] if t.details.strip() else []
+                if t.deadline:
+                    tips.append(f"Deadline {short_date(t.deadline)}")
+                if t.target:
+                    tips.append(f"Aim to finish by {short_date(t.target)}")
+                if self.w.is_asleep(t):
+                    item.setForeground(dim)
+                    tips.append(self._rest_text(t))
+                if tips:
+                    item.setToolTip("\n".join(tips))
+                lst.addItem(item)
+            lst.setCurrentRow(-1)
+            if sel is not None:
+                for i in range(lst.count()):
+                    if lst.item(i).data(Qt.UserRole) == sel:
+                        lst.setCurrentRow(i)
+        self.dated_card.setVisible(self.dated_list.count() > 0)
         self.done_list.clear()
         for d in reversed(self.w.completed):
             when = d.finished_at[11:16] if len(d.finished_at) >= 16 else d.finished_at
             actual = f"{d.actual_min}m actual" if d.actual_min else "not timed"
             self.done_list.addItem(QListWidgetItem(f"{when}   {d.name}   ({d.estimate_min}m planned, {actual})"))
-        self.dumps.clear()
-        for d in fc.read_dumps(self.w.dump_path):
-            self.dumps.addItem(QListWidgetItem(f"{d.when}   {d.text}"))
         self._updating = False
-        self._load_editor(self.list.currentRow())
+        self.show_status(self.w.status_message)
+        self._load_editor()
         self.update_toggle()
+
+    def _rest_text(self, t: fc.Task) -> str:
+        nxt = fc.next_active_day(t, self.w.today())
+        return f"Resting until {short_date(nxt.isoformat())}" if nxt else "Resting, since no days are chosen"
+
+    def _fill_folder_combos(self):
+        """Fill the filter and the editor's folder choice with the folder tree, when it changed."""
+        tree = fc.folder_tree(self.w.folders, self.w.plan.tasks)
+        if tuple(tree) == self._folder_key:
+            return
+        self._folder_key = tuple(tree)
+        was_updating, self._updating = self._updating, True
+        keep_filter = self.filter_combo.currentData() or ""
+        keep_folder = self.ed_folder.currentData()
+        self.filter_combo.clear()
+        self.filter_combo.addItem("All folders", "")
+        self.ed_folder.clear()
+        self.ed_folder.addItem("No folder", "")
+        for p, depth in tree:
+            label = "    " * depth + p.split("/")[-1]
+            self.filter_combo.addItem(label, p)
+            self.ed_folder.addItem(label, p)
+        self.ed_folder.addItem("New folder...", NEW_FOLDER)
+        self.ed_folder.addItem("New subfolder...", NEW_SUBFOLDER)
+        self.filter_combo.setCurrentIndex(max(0, self.filter_combo.findData(keep_filter)))
+        self.ed_folder.setCurrentIndex(max(0, self.ed_folder.findData(keep_folder or "")))
+        self._updating = was_updating
+
+    def _set_folder_choice(self, path: str | None):
+        was_updating, self._updating = self._updating, True
+        self.ed_folder.setCurrentIndex(max(0, self.ed_folder.findData(path or "")))
+        self._updating = was_updating
+        self._last_folder = path
+
+    def _folder_choice(self) -> str | None:
+        data = self.ed_folder.currentData()
+        if data in (NEW_FOLDER, NEW_SUBFOLDER):
+            return self._last_folder
+        return data or None
+
+    def _filter_changed(self, *_):
+        if self._updating:
+            return
+        self.refresh()
+        if not self._editing:
+            self._set_folder_choice(self.filter_path())  # a new task goes into the folder being shown
 
     def _on_timer_selected(self) -> bool:
         """True when Start should pause or resume the task on the timer: it is selected, or nothing is."""
@@ -545,13 +828,19 @@ class TaskPanel(QWidget):
 
     def update_toggle(self):
         timer = self.w.timer
+        t = self.selected_task()
+        self.btn_toggle.setEnabled(True)
         if self._on_timer_selected():
             self.btn_toggle.setText("⏸ Pause" if not timer.paused else "▶ Resume")
             self.btn_toggle.setToolTip(f"Timer is on: {timer.task}")
-        elif self.selected_task() is not None:
+        elif t is not None:
             self.btn_toggle.setText("▶ Start selected")
-            self.btn_toggle.setToolTip(f"Start the selected task. '{timer.task}' is paused and keeps its time."
-                                       if timer.running else "Start the task selected in the list")
+            if self.w.is_asleep(t):
+                self.btn_toggle.setEnabled(False)
+                self.btn_toggle.setToolTip(f"Done for now. {self._rest_text(t)}.")
+            else:
+                self.btn_toggle.setToolTip(f"Start the selected task. '{timer.task}' is paused and keeps its time."
+                                           if timer.running else "Start the task selected in the list")
         else:
             self.btn_toggle.setText("▶ Start…")
             self.btn_toggle.setToolTip("Choose a task to start")
@@ -569,13 +858,101 @@ class TaskPanel(QWidget):
             self.ed_name.clear()
             self.ed_details.clear()
             self.ed_time.set_value(int(self.w.s["default_block_minutes"]))
+            self._show_fields(None, None, self.filter_path(), None)
             self._updating = False
 
-    def _load_editor(self, row: int):
+    def _show_fields(self, deadline, target, folder, repeat):
+        """Put a task's dates, folder and repeat rule into the editor (call with _updating set)."""
+        today = self.w.today()
+        for on, edit, value in ((self.ed_deadline_on, self.ed_deadline, deadline),
+                                (self.ed_target_on, self.ed_target, target)):
+            on.setChecked(bool(value))
+            edit.setDate(_qdate(date.fromisoformat(value) if value else today))
+        self._set_folder_choice(folder)
+        rule = repeat or {}
+        kind = rule.get("kind")
+        self.ed_repeat.setCurrentIndex(REPEAT_KINDS.index(kind) if kind in REPEAT_KINDS else 0)
+        days = rule.get("days", [])
+        for key, cb in zip(fc.WEEKDAY_KEYS, self.ed_days):
+            cb.setChecked(key in days)
+        self.ed_every.setValue(int(rule.get("every", 2)))
+        self._editor_anchor = rule.get("anchor")
+        self._kept_repeat = copy.deepcopy(repeat) if repeat and kind not in REPEAT_KINDS else None
+        self._sync_field_states()
+
+    def _sync_field_states(self):
+        """A repeating task cannot have dates; show the day boxes or the day count only for their rule."""
+        kind = REPEAT_KINDS[self.ed_repeat.currentIndex()]
+        for on, edit in ((self.ed_deadline_on, self.ed_deadline), (self.ed_target_on, self.ed_target)):
+            on.setEnabled(kind is None)
+            edit.setEnabled(kind is None and on.isChecked())
+        self.days_row.setVisible(kind == "days")
+        self.ed_every.setVisible(kind == "every")
+
+    def _editor_values(self) -> dict:
+        """Dates, folder and repeat rule as set in the editor."""
+        kind = REPEAT_KINDS[self.ed_repeat.currentIndex()]
+        if kind is None:
+            repeat = copy.deepcopy(self._kept_repeat)
+        elif kind == "days":
+            repeat = {"kind": "days", "days": [k for k, cb in zip(fc.WEEKDAY_KEYS, self.ed_days) if cb.isChecked()]}
+        elif kind == "every":
+            repeat = {"kind": "every", "every": self.ed_every.value(),
+                      "anchor": self._editor_anchor or self.w.today().isoformat()}
+        else:
+            repeat = {"kind": kind}
+        dated = kind is None and repeat is None
+        return {"deadline": _iso(self.ed_deadline.date()) if dated and self.ed_deadline_on.isChecked() else None,
+                "target": _iso(self.ed_target.date()) if dated and self.ed_target_on.isChecked() else None,
+                "folder": self._folder_choice(), "repeat": repeat}
+
+    def _date_toggled(self, *_):
+        if self._updating:
+            return
+        self._sync_field_states()
+        self._apply_editor()
+
+    def _repeat_changed(self, index: int):
+        if self._updating:
+            return
+        kind = REPEAT_KINDS[index]
+        self._kept_repeat = None  # a choice made here replaces a rule this app did not know
+        self._updating = True
+        if kind is not None:
+            self.ed_deadline_on.setChecked(False)
+            self.ed_target_on.setChecked(False)
+        if kind == "days" and not any(cb.isChecked() for cb in self.ed_days):
+            self.ed_days[self.w.today().weekday()].setChecked(True)
+        if kind == "every" and not self._editor_anchor:
+            self._editor_anchor = self.w.today().isoformat()  # counting starts today
+        self._updating = False
+        self._sync_field_states()
+        self._apply_editor()
+
+    def _editor_folder_changed(self, index: int):
+        if self._updating:
+            return
+        data = self.ed_folder.itemData(index)
+        if data in (NEW_FOLDER, NEW_SUBFOLDER):
+            parent = self._last_folder if data == NEW_SUBFOLDER else None
+            if parent:
+                text, ok = QInputDialog.getText(self, "New subfolder", f"Name of the new subfolder in {parent}:")
+            else:
+                text, ok = QInputDialog.getText(self, "New folder", "Name of the new folder:")
+            path = clean_folder(f"{parent}/{text}" if parent else text) if ok and clean_folder(text) else None
+            if path:
+                self.w.add_folder(path)
+                self._fill_folder_combos()
+            self._set_folder_choice(path or self._last_folder)
+        else:
+            self._last_folder = data or None
+        self._apply_editor()
+
+    def _load_editor(self, *_):
         if self._updating:
             return
         self.update_toggle()
-        t = self.w.plan.tasks[row] if 0 <= row < len(self.w.plan.tasks) else None
+        t = self.selected_task()
         if t is None:
             # Leaving edit mode clears the card; staying in add mode keeps whatever is being typed.
             self._set_mode(editing=False, clear=self._editing)
@@ -584,26 +961,42 @@ class TaskPanel(QWidget):
         self.ed_name.setText(t.name)
         self.ed_time.set_value(t.estimate_min)
         self.ed_details.setPlainText(t.details)
+        self._show_fields(t.deadline, t.target, t.folder, t.repeat)
         self._updating = False
         self._set_mode(editing=True, clear=False)
+
+    def _item_for(self, task_id) -> tuple[QListWidget, QListWidgetItem] | None:
+        for lst in (self.dated_list, self.list):
+            for i in range(lst.count()):
+                if lst.item(i).data(Qt.UserRole) == task_id:
+                    return lst, lst.item(i)
+        return None
 
     def _apply_editor(self, *_):
         if self._updating or not self._editing:
             return
-        row = self.list.currentRow()
-        if not (0 <= row < len(self.w.plan.tasks)):
+        t = self.selected_task()
+        if t is None:
             return
-        t = self.w.plan.tasks[row]
+        v = self._editor_values()
+        before = (t.deadline, t.target, t.folder, t.repeat)
         t.name = self.ed_name.text().strip() or t.name
         t.estimate_min = self.ed_time.value()
         t.details = self.ed_details.toPlainText()
+        t.deadline, t.target, t.folder, t.repeat = v["deadline"], v["target"], v["folder"], v["repeat"]
         if t is self.w.active and self.w.timer.running:
             self.w.timer.task = t.name
             self.w.timer.estimate_min = t.estimate_min
-        self._updating = True
-        self.list.item(row).setText(self._label(t))
-        self.list.item(row).setToolTip(t.details)
-        self._updating = False
+        if (t.deadline, t.target, t.folder, t.repeat) != before:
+            self.refresh()  # the task may move to the other list, or out of the folder shown
+        else:
+            found = self._item_for(t.id)
+            if found is not None:
+                lst, item = found
+                self._updating = True
+                item.setText(self._label(t, lst is self.dated_list, show_folder=self.filter_path() is None))
+                item.setToolTip(t.details)
+                self._updating = False
         self.w.changed()
 
     def _enter_in_name(self):
@@ -611,8 +1004,12 @@ class TaskPanel(QWidget):
             self.add_task()
 
     def new_task(self):
+        self._updating = True
         self.list.setCurrentRow(-1)
+        self.dated_list.setCurrentRow(-1)
+        self._updating = False
         self._set_mode(editing=False, clear=True)
+        self.update_toggle()
         self.ed_name.setFocus()
 
     # -- add / reorder / remove
@@ -621,25 +1018,45 @@ class TaskPanel(QWidget):
         if not name:
             self.ed_name.setFocus()
             return
-        self.w.plan.tasks.append(fc.Task(name, self.ed_time.value(), self.ed_details.toPlainText().strip()))
+        v = self._editor_values()
+        self.w.plan.tasks.insert(0, fc.Task(name, self.ed_time.value(), self.ed_details.toPlainText().strip(),
+                                            deadline=v["deadline"], target=v["target"], folder=v["folder"],
+                                            repeat=v["repeat"]))
         self._set_mode(editing=False, clear=True)
-        self.refresh(-1)
+        self.refresh(None)
         self.ed_name.setFocus()
         self.w.changed()
 
+    def _shown_ranked_ids(self) -> list:
+        return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())]
+
+    def _apply_ranked_order(self, shown_ids: list) -> None:
+        """Reorder the ranked tasks shown in the list. Tasks hidden by the folder filter, and dated tasks,
+        keep their places."""
+        _, ranked = fc.display_sections(self.w.plan.tasks)
+        shown = set(shown_ids)
+        if sorted(t.id for t in ranked if t.id in shown) != sorted(shown_ids):
+            return  # the list no longer matches the tasks (changed meanwhile); leave the order alone
+        new = iter(shown_ids)
+        self.w.plan.tasks = fc.reorder_ranked(self.w.plan.tasks, [next(new) if t.id in shown else t.id
+                                                                  for t in ranked])
+
     def _rows_moved(self, *_):
-        old = list(self.w.plan.tasks)
-        order = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())]
-        if sorted(order) == list(range(len(old))):
-            self.w.plan.tasks = [old[i] for i in order]
-        self.refresh(self.list.currentRow())
+        if self._updating:
+            return
+        self._apply_ranked_order(self._shown_ranked_ids())
+        self.refresh()
         self.w.changed()
 
     def move_selected(self, delta: int):
         row = self.list.currentRow()
         dst = row + delta
-        fc.move_task(self.w.plan, row, dst)
-        self.refresh(dst if 0 <= dst < len(self.w.plan.tasks) else row)
+        if self.list.currentItem() is None or not (0 <= row < self.list.count() and 0 <= dst < self.list.count()):
+            return
+        ids = self._shown_ranked_ids()
+        ids.insert(dst, ids.pop(row))
+        self._apply_ranked_order(ids)
+        self.refresh()
         self.w.changed()
 
     def remove_selected(self):
@@ -651,7 +1068,7 @@ class TaskPanel(QWidget):
             self.w.active = None
             self.w._set_asking(False)
         self.w.plan.tasks.remove(t)
-        self.refresh(-1)
+        self.refresh(None)
         self.w.changed()
 
     def toggle_selected(self):
@@ -666,11 +1083,10 @@ class TaskPanel(QWidget):
             self.w.choose_and_start()
 
     def done_selected(self):
-        """Finish the selected task. With nothing selected, finish the task on the timer (or the top one)."""
-        row = self.list.currentRow()
+        """Finish the selected task. With nothing selected, finish the task on the timer (or the next one)."""
         t = self.selected_task()
         self.w.done(t)
-        self.refresh(min(row, len(self.w.plan.tasks) - 1) if t is not None else -1)
+        self.refresh(t.id if t is not None and t in self.w.plan.tasks else None)
 
     # -- completed
     def _done_index(self) -> int:
@@ -683,9 +1099,10 @@ class TaskPanel(QWidget):
         i = self._done_index()
         if i < 0:
             return
-        self.w.plan.tasks.append(fc.done_to_task(self.w.completed[i]))
+        t = fc.done_to_task(self.w.completed[i])
+        self.w.plan.tasks.insert(0, t)
         del self.w.completed[i]
-        self.refresh(len(self.w.plan.tasks) - 1)
+        self.refresh(t.id)
         self.w.changed()
 
     def clear_done(self):
@@ -693,27 +1110,12 @@ class TaskPanel(QWidget):
         self.refresh()
         self.w.changed()
 
-    # -- thoughts
-    def dump_to_task(self):
-        row = self.dumps.currentRow()
-        dumps = fc.read_dumps(self.w.dump_path)
-        if not (0 <= row < len(dumps)):
-            return
-        self.w.plan.tasks.append(fc.Task(dumps[row].text, int(self.w.s["default_block_minutes"])))
-        fc.remove_dump(self.w.dump_path, row)
-        self.refresh(len(self.w.plan.tasks) - 1)
-        self.w.changed()
-
-    def delete_dump(self):
-        row = self.dumps.currentRow()
-        if row >= 0:
-            fc.remove_dump(self.w.dump_path, row)
-            self.refresh()
-
 
 # ---------------------------------------------------------------- the widget
 
 class FocusWidget(QWidget):
+    status_changed = Signal(str)  # a warning for the tray tooltip, such as a list saved by a newer app
+
     def __init__(self, settings: dict):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.s = settings
@@ -726,7 +1128,6 @@ class FocusWidget(QWidget):
 
         shared = shared_dir()
         self.state_path = shared / "state.json"
-        self.dump_path = shared / "dump.txt"
         self.log_path = shared / "log.csv"
         self.local_path = local_dir() / "local.json"
 
@@ -744,8 +1145,15 @@ class FocusWidget(QWidget):
         self._shared_sig: tuple[int, int] | None = None  # the shared file as this computer last read or wrote it
         self._shared_text: str | None = None
         self._shared_dirty = False  # True while a change has not reached the shared file yet
-        self._dump_sig = _file_sig(self.dump_path)
-        self._adopt(self._read_shared() or fc.State(fc.Plan(), 0, fc.TimerState()))
+        self._last_doc: dict | None = None  # the list as last read or written; changes are stamped against it
+        self._stamp_import = False  # True after reading a file older than version 3 (see _stamped_doc)
+        self._blocked = False  # True once the shared file turned out to be from a newer app, so it is never written
+        self.status_message = ""  # a warning for the panel header and the tray tooltip
+        got = self._read_shared()
+        self._adopt(got[0] if got else fc.State(fc.Plan(), 0, fc.TimerState()))
+        self._last_doc = self._snapshot()
+        if got and got[1]:
+            self._mark_imported()
         # Panel size, details-box height and shrunk/expanded state ride along in the saved geometry.
         self.ui: dict = {k: v for k, v in (geometry or {}).items() if k not in ("x", "y", "w", "h")}
         self._restore_geometry(geometry)
@@ -780,7 +1188,7 @@ class FocusWidget(QWidget):
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.check_shared)
         self.sync_timer.start(SYNC_CHECK_MS)
-        self._save_local()
+        self.save()  # writes the shared file only if reading it needed an upgrade to version 3
 
     # -- pulse property for the animation
     def get_pulse(self) -> float:
@@ -793,11 +1201,23 @@ class FocusWidget(QWidget):
     pulse = Property(float, get_pulse, set_pulse)
 
     # -- model helpers
+    def today(self) -> date:
+        return datetime.now().date()
+
+    def is_asleep(self, t: fc.Task) -> bool:
+        """A repeating task that is done for today, or not due today. It cannot be started."""
+        return bool(t.repeat) and not fc.is_active(t, self.today())
+
+    def display_order(self) -> list[fc.Task]:
+        """Tasks in the order the panel lists them, with dated tasks by date first and then the rest in your order."""
+        dated, ranked = fc.display_sections(self.plan.tasks)
+        return dated + ranked
+
     def current_task(self) -> fc.Task | None:
-        """The task on the timer, or when idle the top of the list (shown as 'Up next')."""
+        """The task on the timer, or when idle the first task that can be started (shown as 'Up next')."""
         if self.timer.running and self.active is not None:
             return self.active
-        return self.plan.tasks[0] if self.plan.tasks else None
+        return next((t for t in self.display_order() if not self.is_asleep(t)), None)
 
     def changed(self):
         """Call after any change to the tasks or timer: write it to the shared folder and repaint."""
@@ -806,53 +1226,112 @@ class FocusWidget(QWidget):
         self.update()
         self._refresh_toggle_labels()
 
+    def _set_status(self, message: str):
+        self.status_message = message
+        self.status_changed.emit(message)
+        if getattr(self, "panel", None) is not None:
+            self.panel.show_status(message)
+
+    # -- folders
+    def state_obj(self) -> fc.State:
+        """The live list as one State (the same task objects, not copies)."""
+        idx = next((i for i, t in enumerate(self.plan.tasks) if t is self.active), 0)
+        return fc.State(self.plan, idx, self.timer, None, self.completed, self.deleted, self.order_updated_at,
+                        self.planner, self.folders, self.folders_updated_at)
+
+    def add_folder(self, path: str):
+        """Add a folder (and its parent folders) to the known folders."""
+        missing = [p for p in folder_with_parents(path) if p not in self.folders]
+        if missing:
+            self.folders = self.folders + missing
+            self.changed()
+
+    def rename_folder(self, old: str, new: str):
+        st = self.state_obj()
+        fc.rename_folder(st, old, new)
+        self.folders = st.folders
+        self.changed()
+        if self.panel.isVisible():
+            self.panel.refresh()
+
+    def delete_folder(self, path: str):
+        st = self.state_obj()
+        fc.delete_folder(st, path)
+        self.folders = st.folders
+        self.changed()
+        if self.panel.isVisible():
+            self.panel.refresh()
+
+    def open_folders(self):
+        FoldersDialog(self).exec()
+
     # -- the list shared through Box
     def _adopt(self, st: fc.State):
-        """Take the list, completed tasks and timer from a loaded state."""
+        """Take the whole list from a loaded state (Box mode replaces everything)."""
         self.plan, self.completed, self.timer = st.plan, st.done, st.timer
+        self.deleted, self.order_updated_at = dict(st.deleted), st.order_updated_at
+        self.planner = st.planner if st.planner is not None else copy.deepcopy(fc.DEFAULT_PLANNER)
+        self.folders, self.folders_updated_at = list(st.folders), st.folders_updated_at
         self.timer.checkpoints = tuple(sorted(self.s["checkpoints"]))
         self.active: fc.Task | None = None
         if self.timer.running:
-            self.active = fc.find_active(self.plan.tasks, st.current_index, self.timer.task)
+            self.active = fc.find_active(self.plan.tasks, st.current_index, self.timer.task, self.timer.task_id)
             if self.active is None:
                 self.timer.skip()
         self.timer.tick(datetime.now())  # catch up the clock; checkpoints already passed do not pulse or chime
 
-    def _read_shared(self) -> fc.State | None:
-        """The shared list as saved, or None while it is missing or only half synced."""
+    def _snapshot(self) -> dict:
+        """The live list as a version 3 document (a copy). It is what the next save compares against."""
+        return self.build_doc()
+
+    def _mark_imported(self):
+        """The shared file was older than version 3. Save it once as version 3 with fresh order, folder and
+        timer stamps, so a later merge never has to break a tie between two unstamped copies."""
+        self._stamp_import = True
+        self._shared_dirty = True
+
+    def _read_shared(self) -> tuple[fc.State, bool] | None:
+        """(the shared list as saved, True if the file was older than version 3), or None while it is
+        missing, only half synced, or saved by a newer app (then nothing is ever written to it again)."""
         sig = _file_sig(self.state_path)
         try:
             text = self.state_path.read_text(encoding="utf-8")
-            st = fc.parse_state(text)
-        except (OSError, ValueError):
+            raw = json.loads(text)
+            st = fc.doc_to_state(raw)
+            old = int(raw.get("version", 1)) < fc.STATE_VERSION
+        except fc.NewerVersionError:
+            self._blocked = True
+            self._set_status(NEWER_FILE_MESSAGE)
+            return None
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
             return None
         self._shared_sig, self._shared_text = sig, text
-        return st
+        return st, old
 
     def check_shared(self):
         """Every few seconds: show changes the other computer saved, or retry a write Box blocked."""
+        if self._blocked:
+            return
         if self._shared_dirty:
             self._save_shared()
             return
         if QApplication.activeModalWidget() or QApplication.activePopupWidget():
             return  # a dialog or menu is holding tasks from the current list; look again once it closes
-        dump_sig = _file_sig(self.dump_path)
-        if dump_sig != self._dump_sig:
-            self._dump_sig = dump_sig
-            if self.panel.isVisible():
-                self.panel.refresh()
         if _file_sig(self.state_path) == self._shared_sig:
             return
         before = self._shared_text
-        st = self._read_shared()
-        if st is not None and self._shared_text != before:
-            self._apply_state(st)
+        got = self._read_shared()
+        if got is not None and self._shared_text != before:
+            self._apply_state(*got)
 
-    def _apply_state(self, st: fc.State):
+    def _apply_state(self, st: fc.State, old_file: bool = False):
         """Show a list the other computer saved."""
-        was = (self.timer.running, self.timer.task)
+        was = (self.timer.running, self.timer.task_id, self.timer.task)
         self._adopt(st)
-        same_task = was == (self.timer.running, self.timer.task)
+        self._last_doc = self._snapshot()
+        if old_file:
+            self._mark_imported()
+        same_task = was == (self.timer.running, self.timer.task_id, self.timer.task)
         # Still over time on the same task: keep this computer's answer. A different task over time: ask.
         self._set_asking(self.timer.running and self.timer.overtime_s > 0 and (self._asking or not same_task))
         self.update()
@@ -877,7 +1356,6 @@ class FocusWidget(QWidget):
         spec = [("▶", "Start / resume (Space)", self.toggle_run),
                 (f"+{self.s['add_minutes_step']}", "Add minutes (+)", self.add_minutes),
                 ("✓", "Done (D)", self.done),
-                ("💭", "Dump a thought (T)", self.dump_thought),
                 ("☰", "All tasks (Enter)", self.open_panel),
                 ("–", "Shrink to a small circle (M). Click the circle to expand", lambda: self.set_mini(True)),
                 ("✕", "Hide widget (Esc). Ctrl+Alt+F or the tray icon brings it back", self.hide)]
@@ -989,12 +1467,49 @@ class FocusWidget(QWidget):
     def _save_local(self):
         _write_json(self.local_path, {"geometry": self.geometry_dict(), "merged_into_shared": self._merged})
 
+    # -- building and writing the shared document (one place each)
+    def build_doc(self) -> dict:
+        """The whole live list as a state.json version 3 document, not stamped yet."""
+        doc = fc.state_to_doc(self.state_obj())
+        doc["geometry"] = None  # the window position stays on each computer
+        return doc
+
+    def _stamped_doc(self) -> dict:
+        """build_doc() with change stamps set wherever it differs from the list as last read or written."""
+        now = fc.now_iso()
+        doc = fc.stamp_changes(self._last_doc, self.build_doc(), now)
+        if self._stamp_import:
+            doc["order_updated_at"] = doc["folders_updated_at"] = doc["timer"]["updated_at"] = now
+        return doc
+
+    def _take_stamps(self, doc: dict):
+        """Copy the stamps of a written document back onto the live list, and remember it for the next save."""
+        tasks = {x["id"]: x["updated_at"] for x in doc["plan"]["tasks"]}
+        for t in self.plan.tasks:
+            t.updated_at = tasks.get(t.id, t.updated_at)
+        done = {x["id"]: x["updated_at"] for x in doc["done"]}
+        for d in self.completed:
+            d.updated_at = done.get(d.id, d.updated_at)
+        self.timer.updated_at = doc["timer"]["updated_at"]
+        self.deleted, self.order_updated_at = dict(doc["deleted"]), doc["order_updated_at"]
+        self.planner, self.folders_updated_at = copy.deepcopy(doc["planner"]), doc["folders_updated_at"]
+        self._last_doc = doc
+        self._stamp_import = False
+
     def _save_shared(self):
-        idx = next((i for i, t in enumerate(self.plan.tasks) if t is self.active), 0)
+        """Write the shared file (Box mode). Stamps are set right before writing; an unchanged list is not
+        written; a file saved by a newer app is never written."""
+        if self._blocked:
+            return
+        doc = self._stamped_doc()
+        if doc == self._last_doc and self._shared_text is not None:
+            self._shared_dirty = False
+            return
         try:
-            text = fc.save_state(self.state_path, self.plan, idx, self.timer, done=self.completed)
+            text = fc.save_state_obj(self.state_path, fc.doc_to_state(doc))
         except OSError:
             return  # Box can hold the file for a moment while it uploads; check_shared tries again
+        self._take_stamps(doc)
         self._shared_sig, self._shared_text = _file_sig(self.state_path), text
         self._shared_dirty = False
 
@@ -1036,8 +1551,6 @@ class FocusWidget(QWidget):
             self.toggle_run()
         elif t.lower() == "d":
             self.done()
-        elif t.lower() == "t":
-            self.dump_thought()
         elif t.lower() == "m":
             self.set_mini(not self.mini)
         elif k in (Qt.Key_Return, Qt.Key_Enter):
@@ -1063,8 +1576,8 @@ class FocusWidget(QWidget):
             self.panel.refresh()
 
     def choose_and_start(self):
-        """Start the only task, or pop up the list so you pick which one to start."""
-        tasks = self.plan.tasks
+        """Start the only task, or pop up the list so you pick which one to start. Sleeping repeats are left out."""
+        tasks = [t for t in self.display_order() if not self.is_asleep(t)]
         if not tasks:
             self.open_panel()
             return
@@ -1091,10 +1604,12 @@ class FocusWidget(QWidget):
             if self.timer.paused:
                 self.toggle_run()
             return
+        if self.is_asleep(task):
+            return  # a repeat that is done for today, or not due today, waits for its next day
         if self.timer.running and self.active is not None:
             self.timer.pause(now)
             self.active.spent_s = self.timer.elapsed_s
-        self.timer.start(task.name, task.estimate_min, now, spent_s=task.spent_s)
+        self.timer.start(task.name, task.estimate_min, now, spent_s=task.spent_s, task_id=task.id)
         task.spent_s = 0.0  # while on the timer, its time is counted there
         self.active = task
         self._set_asking(False)
@@ -1120,10 +1635,13 @@ class FocusWidget(QWidget):
         self._show_rows(self.underMouse())
 
     def done(self, task: fc.Task | None = None):
-        """Finish `task` (default: the task on the timer, or the top one). Logs it and moves it to Completed."""
+        """Finish `task` (default: the task on the timer, or Up next). Logs it and adds it to Completed.
+        A repeating task stays on the list and sleeps until its next day."""
         task = task if task is not None else self.current_task()
         if task is None:
             return
+        if self.is_asleep(task) and not (task is self.active and self.timer.running):
+            return  # already done for today
         now = datetime.now()
         if task is self.active and self.timer.running:
             rec = self.timer.done(now)
@@ -1132,9 +1650,10 @@ class FocusWidget(QWidget):
         else:
             rec = fc.BlockRecord(task.name, task.estimate_min, int(round(task.spent_s / 60)), now)
         self._log(rec)
-        self.completed.append(fc.DoneTask(task.name, rec.estimate_min, rec.actual_min, f"{now:%Y-%m-%d %H:%M}",
-                                          task.details))
-        self.plan.tasks = [t for t in self.plan.tasks if t is not task]
+        entry = fc.finish_task(task, now, rec.actual_min)
+        self.completed[:] = [d for d in self.completed if d.id != entry.id] + [entry]
+        if not task.repeat:
+            self.plan.tasks = [t for t in self.plan.tasks if t is not task]
         self._celebrate_until = now.timestamp() + CELEBRATE_MS / 1000
         self.changed()
         if self.panel.isVisible():
@@ -1147,15 +1666,6 @@ class FocusWidget(QWidget):
             if new:
                 w.writerow(["finished_at", "task", "estimate_min", "actual_min"])
             w.writerow([rec.finished_at.isoformat(timespec="minutes"), rec.task, rec.estimate_min, rec.actual_min])
-
-    def dump_thought(self):
-        dlg = DumpDialog(self, self.s["colors"])
-        if dlg.exec() == QDialog.Accepted and dlg.text():
-            with self.dump_path.open("a", encoding="utf-8") as f:
-                f.write(f"{datetime.now():%Y-%m-%d %H:%M}  {dlg.text()}\n")
-            if self.panel.isVisible():
-                self.panel.refresh(self.panel.list.currentRow())
-        self.activateWindow()
 
     def open_panel(self):
         self.panel.show()
@@ -1203,7 +1713,7 @@ class FocusWidget(QWidget):
         if datetime.now().timestamp() < self._celebrate_until:
             return "🎉"
         if not self.timer.running:
-            return "🥳" if not self.plan.tasks else "🌱"
+            return "🥳" if self.current_task() is None else "🌱"
         if self.timer.paused:
             return "😴"
         if self.timer.overtime_s > 0:
@@ -1273,7 +1783,8 @@ class FocusWidget(QWidget):
         elif task:
             title = f"Up next: {task.name}"
         else:
-            title = "All done, the list is empty" if self.completed else "Double-click to add tasks"
+            title = ("All done for today" if self.plan.tasks else
+                     "All done, the list is empty" if self.completed else "Double-click to add tasks")
         p.drawText(x0, 32, QFontMetrics(big).elidedText(title, Qt.ElideRight, avail))
 
         p.setFont(small)
@@ -1329,8 +1840,9 @@ class FocusWidget(QWidget):
         elif task:
             lines.append((f"{task.estimate_min} min planned. Press ▶ or Space when ready.", False))
         if task is not None:
-            fin = fc.list_end(self.plan.tasks, self.active, self.timer, now)
-            left = len(self.plan.tasks) - (1 if self.timer.running else 0)
+            todo = [t for t in self.plan.tasks if not self.is_asleep(t) or t is self.active]
+            fin = fc.list_end(todo, self.active, self.timer, now)
+            left = len(todo) - (1 if self.timer.running else 0)
             more = f" ({left} more after this)" if (self.timer.running and left > 0) else \
                    (f" ({left} tasks)" if not self.timer.running else " (last task)")
             lines.append((f"list ends about {fin:%I:%M %p}".lstrip("0").replace(" 0", " ") + more, True))
@@ -1375,6 +1887,7 @@ class TrayController:
         menu.addAction(QAction("All tasks…", menu, triggered=widget.open_panel))
         menu.addAction(QAction("Shrink / expand", menu, triggered=lambda: widget.set_mini(not widget.mini)))
         menu.addAction(QAction("Start / pause", menu, triggered=widget.toggle_run))
+        menu.addAction(QAction("Folders...", menu, triggered=widget.open_folders))
         menu.addSeparator()
         self.act_login = QAction("Start at login", menu, checkable=True)
         self.act_login.setChecked(startup_shortcut_path().exists())
@@ -1386,12 +1899,20 @@ class TrayController:
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.toggle() if reason == QSystemTrayIcon.Trigger else None)
         self.tray.show()
+        widget.status_changed.connect(self.show_status)
+        self.show_status(widget.status_message)
 
         mods, key = parse_hotkey(settings.get("hotkey_show_hide", "ctrl+alt+f"))
         self.filter = HotkeyFilter(self.toggle)
         app.installNativeEventFilter(self.filter)
         if key and not ctypes.windll.user32.RegisterHotKey(None, HOTKEY_ID, mods | 0x4000, key):
             self.tray.showMessage("Focus Tool", "Could not register the show/hide hotkey (already in use).", icon, 5000)
+
+    def show_status(self, message: str):
+        """Put a warning (such as a list saved by a newer app) in the tray tooltip, and pop it up once."""
+        self.tray.setToolTip(f"Focus Tool\n{message}" if message else "Focus Tool")
+        if message:
+            self.tray.showMessage("Focus Tool", message, QSystemTrayIcon.Warning, 8000)
 
     def toggle(self):
         if self.w.isVisible():

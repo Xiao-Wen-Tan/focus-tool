@@ -42,13 +42,11 @@ def make(folders):
         w.close()
 
 
-def _old_local_data(local: Path, tasks: str, done: list, dumps: str = "", log: str = ""):
+def _old_local_data(local: Path, tasks: str, done: list, log: str = ""):
     """The files the earlier version kept on one computer only."""
     local.mkdir(parents=True, exist_ok=True)
     fc.save_state(local / "state.json", fc.parse_plan(tasks, 45), 0, fc.TimerState(),
                   geometry={"x": 40, "y": 50, "w": 64, "h": 64, "mini": True}, done=done)
-    if dumps:
-        (local / "dump.txt").write_text(dumps, encoding="utf-8")
     if log:
         (local / "log.csv").write_text(log, encoding="utf-8")
 
@@ -111,13 +109,12 @@ def test_settings_are_shared_and_start_from_this_computers_old_settings(folders)
 
 def test_first_computer_moves_its_list_into_the_shared_folder(folders, make):
     local, shared = folders
-    _old_local_data(local, "Old task 10m", [fc.DoneTask("Finished", 5, 5, "2026-10-01 09:00")],
-                    dumps="2026-10-01 09:05  an idea\n")
+    _old_local_data(local, "Old task 10m", [fc.DoneTask("Finished", 5, 5, "2026-10-01 09:00")])
     before = (local / "state.json").read_text(encoding="utf-8")
     w = make()
     assert [t.name for t in w.plan.tasks] == ["Old task"]
     assert [d.name for d in w.completed] == ["Finished"]
-    assert [d.text for d in fc.read_dumps(shared / "dump.txt")] == ["an idea"]
+    assert fc.load_state(shared / "state.json").plan.tasks[0].id == w.plan.tasks[0].id
     assert w.mini  # the window state moved to this computer's own file
     assert (local / "state.json").read_text(encoding="utf-8") == before  # the old file stays as a backup
 
