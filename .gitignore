@@ -1,0 +1,13 @@
+# Never publish task data or local/generated files
+data/
+build/
+.remember/
+.claude/
+.superpowers/
+__pycache__/
+.pytest_cache/
+*.tmp
+*.exe
+local*.json
+github-cache.json
+node_modules/

@@ -1,0 +1,27 @@
+{
+  "default_block_minutes": 45,
+  "add_minutes_step": 5,
+  "checkpoints": [0.5, 0.9, 1.0],
+  "chime_at_end": true,
+  "toast_at_end": false,
+  "opacity": 0.96,
+  "widget_width": 420,
+  "widget_height": 168,
+  "font_family": "Segoe UI",
+  "hotkey_show_hide": "ctrl+alt+f",
+  "mascot": true,
+  "colors": {
+    "background": "#FFF7EF",
+    "border": "#F6DCC8",
+    "text": "#4B4453",
+    "text_dim": "#9A8FA6",
+    "disk_track": "#F7E6DC",
+    "disk_remaining": "#8FD9C4",
+    "disk_pulse": "#FFC29B",
+    "disk_overtime": "#D8CBEF",
+    "overtime_ring": "#F5A07A",
+    "button": "#FBE9DD",
+    "button_hover": "#F7D6C2",
+    "button_text": "#5B4B63"
+  }
+}
