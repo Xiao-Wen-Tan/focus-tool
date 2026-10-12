@@ -1,0 +1,92 @@
+name: Replan
+
+# Runs the day plan every night. Two cron times cover both US Central clocks
+# (CDT and CST), since GitHub Actions cron is always UTC and does not shift
+# with daylight saving: 7 0 * * * is 19:07 Central during Central Daylight
+# Time, and 7 1 * * * is 19:07 Central during Central Standard Time. Only one
+# of the two actually lands near 19:00 local on a given day; the planner
+# itself checks the local hour and is a no-op if it is not past 19:00 yet.
+on:
+  schedule:
+    - cron: "7 0 * * *"
+    - cron: "7 1 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan mode
+        type: choice
+        options:
+          - now
+          - tomorrow
+          - auto
+        default: now
+
+permissions:
+  contents: write
+
+concurrency:
+  group: replan
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout focus-data
+        uses: actions/checkout@v4
+        with:
+          path: data
+
+      # OWNER is a placeholder. Replace it with the GitHub username or
+      # organization that owns the public focus-tool repo when this workflow
+      # is set up in the real focus-data repo.
+      - name: Checkout focus-tool (planner.py)
+        uses: actions/checkout@v4
+        with:
+          repository: OWNER/focus-tool
+          path: tool
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Plan and push, with retry on a push race
+        working-directory: data
+        env:
+          MODE_INPUT: ${{ github.event.inputs.mode }}
+        run: |
+          set -e
+          git config user.name "focus-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          MODE="${MODE_INPUT:-auto}"
+          attempt=1
+          max_attempts=5
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Attempt $attempt of $max_attempts"
+            git fetch origin main
+            git reset --hard origin/main
+
+            python ../tool/planner.py --state state.json --out day-plan.json --mode "$MODE" --by actions
+
+            git add day-plan.json
+            if git diff --cached --quiet; then
+              echo "No change to day-plan.json; nothing to commit."
+              exit 0
+            fi
+
+            plan_date=$(python -c "import json; print(json.load(open('day-plan.json'))['date'])")
+            git commit -m "plan: $plan_date ($MODE)"
+
+            if git push origin main; then
+              echo "Pushed."
+              exit 0
+            fi
+
+            echo "Push failed, likely a race with another writer; retrying."
+            git reset --hard HEAD~1
+            attempt=$((attempt + 1))
+            sleep $((attempt * 5))
+          done
+
+          echo "Gave up after $max_attempts attempts."
+          exit 1

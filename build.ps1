@@ -20,12 +20,27 @@ $env:PYTHONDONTWRITEBYTECODE = "1"  # keep __pycache__ and .pytest_cache out of 
 & $py -m pytest -q -p no:cacheprovider tests
 if ($LASTEXITCODE -ne 0) { throw "Tests failed; not building." }
 
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    Write-Host "Running node --test tests/js"
+    & node --test (Join-Path $here "tests\js")
+    if ($LASTEXITCODE -ne 0) { throw "node --test tests/js failed; not building." }
+} else {
+    Write-Host "node not found on PATH; skipping tests/js (JavaScript port is untested by this build)."
+}
+
+Write-Host "Checking the repo is safe to make public"
+& $py (Join-Path $here "tools\check_public.py") --repo-root $here
+if ($LASTEXITCODE -ne 0) { throw "check_public.py found files unsafe for the public repo; not building." }
+
 $work = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-work"
 $dist = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-dist"
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name FocusTool `
     --icon (Join-Path $here "assets\icon.ico") `
     --add-data ((Join-Path $here "assets") + ";assets") `
     --add-data ((Join-Path $here "settings.default.json") + ";.") `
+    --collect-data tzdata `
+    --hidden-import win32cred `
     --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQml --exclude-module PySide6.Qt3DCore `
     --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtCharts --exclude-module PySide6.QtNetwork `

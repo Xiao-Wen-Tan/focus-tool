@@ -1,0 +1,22 @@
+#!/bin/sh
+# Pre-commit hook: refuses the commit if any staged file would leak your real
+# task data into this PUBLIC repo. See tools/check_public.py for what it checks.
+#
+# To install, copy or symlink this file to .git/hooks/pre-commit and make it
+# executable, for example from the repo root:
+#   cp tools/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+
+repo_root=$(git rev-parse --show-toplevel) || exit 1
+
+venv_py="$LOCALAPPDATA/FocusTool/venv/Scripts/python.exe"
+if [ -x "$venv_py" ]; then
+    py="$venv_py"
+elif command -v python >/dev/null 2>&1; then
+    py="python"
+else
+    py="python3"
+fi
+
+"$py" "$repo_root/tools/check_public.py" --staged --repo-root "$repo_root"
+exit $?
