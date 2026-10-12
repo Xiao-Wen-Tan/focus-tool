@@ -1,0 +1,202 @@
+{
+  "description": "cases: in_folder(task, path) -> true if path is null or task.folder equals path or starts with path + '/'. tree_cases: folder_tree(folders, tasks) -> [path, depth] for every known path and its parents, sorted by the list of '/'-separated parts, depth = number of '/'.",
+  "cases": [
+    {
+      "description": "path null: every task",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": "Paper/Theory",
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": null,
+      "expected": true
+    },
+    {
+      "description": "path null: task without folder",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": null,
+      "expected": true
+    },
+    {
+      "description": "exact folder",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": "Paper/Theory",
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": "Paper/Theory",
+      "expected": true
+    },
+    {
+      "description": "parent folder",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": "Paper/Theory",
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": "Paper",
+      "expected": true
+    },
+    {
+      "description": "name prefix is not a parent",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": "Papers",
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": "Paper",
+      "expected": false
+    },
+    {
+      "description": "subfolder path does not match the parent task",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": "Paper",
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": "Paper/Theory",
+      "expected": false
+    },
+    {
+      "description": "task without folder, path set",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "path": "Paper",
+      "expected": false
+    }
+  ],
+  "tree_cases": [
+    {
+      "description": "parents added, children right after their parent (sort by path parts)",
+      "folders": [
+        "Paper/Theory",
+        "Paper B",
+        "Paper"
+      ],
+      "tasks": [
+        {
+          "id": "a",
+          "name": "A",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": "Teach/Fall/Week 1",
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "expected": [
+        [
+          "Paper",
+          0
+        ],
+        [
+          "Paper/Theory",
+          1
+        ],
+        [
+          "Paper B",
+          0
+        ],
+        [
+          "Teach",
+          0
+        ],
+        [
+          "Teach/Fall",
+          1
+        ],
+        [
+          "Teach/Fall/Week 1",
+          2
+        ]
+      ]
+    },
+    {
+      "description": "empty",
+      "folders": [],
+      "tasks": [
+        {
+          "id": "a",
+          "name": "A",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "expected": []
+    }
+  ]
+}

@@ -1,0 +1,327 @@
+{
+  "description": "next_block(day_plan, now, live_ids). now is naive local time. Returns the first block whose task_id is live and whose end (on now's date) is after now; null if the plan date is not now's date or nothing matches.",
+  "cases": [
+    {
+      "description": "inside a block: that block",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T09:10:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": {
+        "task_id": "x",
+        "name": "X",
+        "start": "09:00",
+        "end": "09:30",
+        "minutes": 30,
+        "kind": "ranked"
+      }
+    },
+    {
+      "description": "before the first block: the first block",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T08:00:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": {
+        "task_id": "x",
+        "name": "X",
+        "start": "09:00",
+        "end": "09:30",
+        "minutes": 30,
+        "kind": "ranked"
+      }
+    },
+    {
+      "description": "exactly at a block's end: the next block",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T09:30:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": {
+        "task_id": "y",
+        "name": "Y",
+        "start": "09:30",
+        "end": "10:00",
+        "minutes": 30,
+        "kind": "ranked"
+      }
+    },
+    {
+      "description": "the current block's task is gone: the next live one",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T09:10:00",
+      "live_ids": [
+        "z"
+      ],
+      "expected": {
+        "task_id": "z",
+        "name": "Z",
+        "start": "13:30",
+        "end": "14:00",
+        "minutes": 30,
+        "kind": "dated"
+      }
+    },
+    {
+      "description": "in the lunch gap: the afternoon block",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T12:00:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": {
+        "task_id": "z",
+        "name": "Z",
+        "start": "13:30",
+        "end": "14:00",
+        "minutes": 30,
+        "kind": "dated"
+      }
+    },
+    {
+      "description": "after the last block: null",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-13T14:00:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": null
+    },
+    {
+      "description": "plan is for another day: null",
+      "day_plan": {
+        "version": 1,
+        "date": "2026-10-13",
+        "blocks": [
+          {
+            "task_id": "x",
+            "name": "X",
+            "start": "09:00",
+            "end": "09:30",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "y",
+            "name": "Y",
+            "start": "09:30",
+            "end": "10:00",
+            "minutes": 30,
+            "kind": "ranked"
+          },
+          {
+            "task_id": "z",
+            "name": "Z",
+            "start": "13:30",
+            "end": "14:00",
+            "minutes": 30,
+            "kind": "dated"
+          }
+        ]
+      },
+      "now": "2026-10-14T09:10:00",
+      "live_ids": [
+        "x",
+        "y",
+        "z"
+      ],
+      "expected": null
+    },
+    {
+      "description": "no plan: null",
+      "day_plan": null,
+      "now": "2026-10-13T09:10:00",
+      "live_ids": [
+        "x"
+      ],
+      "expected": null
+    }
+  ]
+}

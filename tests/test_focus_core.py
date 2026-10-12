@@ -173,26 +173,6 @@ def test_next_prefix_is_just_a_task_now():
     assert not hasattr(plan, "next_event_at")
 
 
-# ---------- dump file access ----------
-
-def test_read_dumps_parses_timestamp_and_text(tmp_path):
-    p = tmp_path / "dump.txt"
-    p.write_text("2026-09-21 14:10  call the dean\n2026-09-21 14:12  buy milk\n", encoding="utf-8")
-    dumps = fc.read_dumps(p)
-    assert [(d.when, d.text) for d in dumps] == [("2026-09-21 14:10", "call the dean"), ("2026-09-21 14:12", "buy milk")]
-
-
-def test_read_dumps_missing_file_is_empty(tmp_path):
-    assert fc.read_dumps(tmp_path / "none.txt") == []
-
-
-def test_remove_dump_rewrites_file_without_that_line(tmp_path):
-    p = tmp_path / "dump.txt"
-    p.write_text("2026-09-21 14:10  a\n2026-09-21 14:12  b\n2026-09-21 14:13  c\n", encoding="utf-8")
-    fc.remove_dump(p, 1)
-    assert [d.text for d in fc.read_dumps(p)] == ["a", "c"]
-
-
 # ---------- v1.3: completed tasks persist, time-up never auto-completes ----------
 
 def test_done_list_round_trips_through_state_file(tmp_path):
@@ -315,3 +295,276 @@ def test_time_spent_survives_state_round_trip(tmp_path):
     plan = fc.Plan([fc.Task("A", 15, spent_s=111.5), fc.Task("B", 10)])
     fc.save_state(tmp_path / "s.json", plan=plan, current_index=0, timer=fc.TimerState())
     assert [t.spent_s for t in fc.load_state(tmp_path / "s.json").plan.tasks] == [111.5, 0]
+
+
+# ---------- v2: ids, stamps and state version 3 ----------
+
+import json  # noqa: E402
+import re  # noqa: E402
+import uuid  # noqa: E402
+from datetime import date  # noqa: E402
+
+
+def _v2_doc():
+    """A version 2 state file as the earlier desktop app wrote it."""
+    return {
+        "version": 2,
+        "plan": {"tasks": [{"name": "Alpha", "estimate_min": 10, "details": "", "spent_s": 0.0},
+                           {"name": "Beta", "estimate_min": 20, "details": "x", "spent_s": 30.0},
+                           {"name": "Alpha", "estimate_min": 5, "details": "", "spent_s": 0.0}]},
+        "current_index": 2,
+        "timer": {"task": "Alpha", "estimate_min": 5, "running": True, "paused": True, "started_at": None,
+                  "banked_s": 12.0, "fired": [], "checkpoints": [0.5, 0.9, 1.0]},
+        "geometry": None,
+        "done": [{"name": "Gamma", "estimate_min": 5, "actual_min": 6, "finished_at": "2026-10-01 09:00",
+                  "details": ""}],
+    }
+
+
+def test_now_iso_has_millisecond_utc_format():
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", fc.now_iso())
+
+
+def test_new_task_gets_a_hex_id_and_epoch_stamp():
+    a, b = fc.Task("Alpha", 10), fc.Task("Alpha", 10)
+    assert re.fullmatch(r"[0-9a-f]{32}", a.id) and a.id != b.id
+    assert a.updated_at == fc.EPOCH and a.deadline is None and a.repeat is None
+
+
+def test_migrate_gives_deterministic_ids_and_distinct_ids_for_duplicate_names():
+    d1, d2 = fc.migrate_doc(_v2_doc()), fc.migrate_doc(_v2_doc())
+    ids = [t["id"] for t in d1["plan"]["tasks"]]
+    assert ids == [t["id"] for t in d2["plan"]["tasks"]]
+    assert len(set(ids)) == 3
+    assert ids[0] == uuid.uuid5(fc.NS, "task:Alpha#0").hex
+    assert ids[2] == uuid.uuid5(fc.NS, "task:Alpha#1").hex
+    assert d1["done"][0]["id"] == uuid.uuid5(fc.NS, "done:Gamma#2026-10-01 09:00").hex
+    assert d1["version"] == 3 and d1["folders"] == [] and d1["deleted"] == {}
+    assert d1["planner"] == fc.DEFAULT_PLANNER and d1["planner"] is not fc.DEFAULT_PLANNER
+    assert d1["order_updated_at"] == fc.EPOCH and d1["plan"]["tasks"][1]["updated_at"] == fc.EPOCH
+    assert d1["plan"]["tasks"][1]["deadline"] is None and d1["plan"]["tasks"][1]["spent_s"] == 30.0
+
+
+def test_migrate_resolves_timer_task_id_by_saved_index_then_name():
+    doc = fc.migrate_doc(_v2_doc())
+    assert doc["timer"]["task_id"] == doc["plan"]["tasks"][2]["id"]  # index 2 is the second "Alpha"
+    d = _v2_doc()
+    d["current_index"] = 1
+    doc = fc.migrate_doc(d)
+    assert doc["timer"]["task_id"] == doc["plan"]["tasks"][0]["id"]  # index points at Beta, so first Alpha
+    assert doc["timer"]["updated_at"] == fc.EPOCH
+
+
+def test_migrate_v1_without_done_list():
+    d = _v2_doc()
+    d["version"] = 1
+    del d["done"]
+    doc = fc.migrate_doc(d)
+    assert doc["version"] == 3 and doc["done"] == []
+
+
+def test_version_above_3_is_rejected():
+    d = fc.migrate_doc(_v2_doc())
+    d["version"] = 4
+    with pytest.raises(ValueError):
+        fc.doc_to_state(d)
+    with pytest.raises(ValueError):
+        fc.parse_state(json.dumps(d))
+
+
+def test_v2_file_loads_and_saves_as_v3_round_trip(tmp_path):
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps(_v2_doc()), encoding="utf-8")
+    st = fc.load_state(p)
+    assert [t.name for t in st.plan.tasks] == ["Alpha", "Beta", "Alpha"]
+    assert st.timer.task_id == st.plan.tasks[2].id
+    text = fc.save_state_obj(tmp_path / "out.json", st)
+    doc = json.loads(text)
+    assert doc["version"] == 3
+    assert fc.state_to_doc(fc.doc_to_state(doc)) == doc
+
+
+def test_v3_round_trip_keeps_every_field(tmp_path):
+    t = fc.Task("Alpha", 30, "d", 5.0, deadline="2026-10-16", target="2026-10-15", folder="Paper/Theory",
+                updated_at="2026-10-12T10:00:00.000Z")
+    r = fc.Task("Daily walk", 15, repeat={"kind": "every", "every": 2, "anchor": "2026-10-12"},
+                last_done="2026-10-12")
+    timer = fc.TimerState()
+    timer.start("Alpha", 30, T0, task_id=t.id)
+    timer.updated_at = "2026-10-12T10:00:01.000Z"
+    st = fc.State(fc.Plan([t, r]), 0, timer, done=[fc.DoneTask("Beta", 5, 6, "2026-10-12 09:00", folder="Paper")],
+                  deleted={"abc": "2026-10-12T09:00:00.000Z"}, order_updated_at="2026-10-12T08:00:00.000Z",
+                  folders=["Paper", "Paper/Theory"], folders_updated_at="2026-10-12T07:00:00.000Z")
+    fc.save_state_obj(tmp_path / "s.json", st)
+    back = fc.load_state(tmp_path / "s.json")
+    assert fc.state_to_doc(back) == fc.state_to_doc(st)
+    assert back.plan.tasks[0].deadline == "2026-10-16" and back.plan.tasks[1].repeat["every"] == 2
+    assert back.timer.task_id == t.id and back.timer.updated_at == "2026-10-12T10:00:01.000Z"
+    assert back.done[0].folder == "Paper" and back.deleted == {"abc": "2026-10-12T09:00:00.000Z"}
+    assert back.planner == fc.DEFAULT_PLANNER
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 3
+
+
+def test_old_timer_dict_without_new_fields_loads():
+    t = fc.TimerState.from_dict({"task": "A", "estimate_min": 5, "running": False})
+    assert t.task_id is None and t.updated_at == fc.EPOCH
+    assert t.to_dict()["task_id"] is None and t.to_dict()["updated_at"] == fc.EPOCH
+
+
+def test_find_active_matches_by_id_first():
+    tasks = [fc.Task("A", 5), fc.Task("A", 5)]
+    assert fc.find_active(tasks, 0, "A", task_id=tasks[1].id) is tasks[1]
+    assert fc.find_active(tasks, 0, "A", task_id="missing") is tasks[0]
+
+
+def test_done_to_task_keeps_dates_and_folder_with_a_new_id():
+    d = fc.DoneTask("A", 10, 12, "2026-09-21 10:12", deadline="2026-10-16", folder="Paper")
+    t = fc.done_to_task(d)
+    assert (t.deadline, t.folder) == ("2026-10-16", "Paper") and t.id != d.id
+
+
+# ---------- dates and sections ----------
+
+def test_finish_by_counts_back_business_days():
+    assert fc.finish_by(date(2026, 10, 16)) == date(2026, 10, 14)  # Fri -> Wed
+    assert fc.finish_by(date(2026, 10, 19)) == date(2026, 10, 15)  # Mon -> Thu
+    assert fc.finish_by(date(2026, 10, 17)) == date(2026, 10, 15)  # Sat -> Thu
+    assert fc.finish_by(date(2026, 10, 18)) == date(2026, 10, 15)  # Sun -> Thu
+    assert fc.finish_by(date(2026, 10, 16), 0) == date(2026, 10, 16)
+
+
+def test_display_sections_sorts_dated_by_earliest_date_then_deadline_first():
+    a = fc.Task("A", 5)
+    b = fc.Task("B", 5, target="2026-10-20")
+    c = fc.Task("C", 5, deadline="2026-10-20")
+    d = fc.Task("D", 5, deadline="2026-10-25", target="2026-10-14")
+    e = fc.Task("E", 5, repeat={"kind": "daily"})
+    dated, ranked = fc.display_sections([a, b, c, d, e])
+    assert [t.name for t in dated] == ["D", "C", "B"]
+    assert [t.name for t in ranked] == ["A", "E"]
+
+
+def test_reorder_ranked_keeps_dated_slots():
+    a, b, c, d = fc.Task("A", 5), fc.Task("B", 5, deadline="2026-10-16"), fc.Task("C", 5), fc.Task("D", 5)
+    out = fc.reorder_ranked([a, b, c, d], [d.id, a.id, c.id])
+    assert [t.name for t in out] == ["D", "B", "A", "C"]
+
+
+def test_next_block_returns_current_or_next_live_block():
+    plan = {"date": "2026-10-13", "blocks": [
+        {"task_id": "x", "start": "09:00", "end": "09:30"},
+        {"task_id": "y", "start": "09:30", "end": "10:00"},
+        {"task_id": "z", "start": "10:00", "end": "11:00"}]}
+    assert fc.next_block(plan, datetime(2026, 10, 13, 9, 10), {"x", "y", "z"})["task_id"] == "x"
+    assert fc.next_block(plan, datetime(2026, 10, 13, 9, 10), {"z"})["task_id"] == "z"
+    assert fc.next_block(plan, datetime(2026, 10, 13, 9, 30), {"x", "y"})["task_id"] == "y"
+    assert fc.next_block(plan, datetime(2026, 10, 13, 11, 0), {"x", "y", "z"}) is None
+    assert fc.next_block(plan, datetime(2026, 10, 14, 9, 0), {"x"}) is None
+    assert fc.next_block(None, datetime(2026, 10, 13, 9, 0), {"x"}) is None
+
+
+# ---------- repeating tasks ----------
+
+def test_is_active_for_each_repeat_kind():
+    mon, tue, sat = date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 17)
+    assert fc.is_active(fc.Task("A", 5), sat)
+    assert fc.is_active(fc.Task("A", 5, repeat={"kind": "daily"}), sat)
+    wk = fc.Task("A", 5, repeat={"kind": "weekdays"})
+    assert fc.is_active(wk, mon) and not fc.is_active(wk, sat)
+    days = fc.Task("A", 5, repeat={"kind": "days", "days": ["mon", "thu"]})
+    assert fc.is_active(days, mon) and not fc.is_active(days, tue) and fc.is_active(days, date(2026, 10, 15))
+
+
+def test_every_two_days_is_calendar_based_and_skipping_does_not_shift_it():
+    t = fc.Task("A", 5, repeat={"kind": "every", "every": 2, "anchor": "2026-10-12"})
+    assert [fc.is_active(t, date(2026, 10, d)) for d in range(11, 17)] == [False, True, False, True, False, True]
+    t.last_done = "2026-10-12"  # 10/14 is then skipped (never done); 10/16 is still a day
+    assert not fc.is_active(t, date(2026, 10, 12))
+    assert fc.is_active(t, date(2026, 10, 16))
+
+
+def test_last_done_blocks_only_that_day():
+    t = fc.Task("A", 5, repeat={"kind": "daily"}, last_done="2026-10-12")
+    assert not fc.is_active(t, date(2026, 10, 12)) and fc.is_active(t, date(2026, 10, 13))
+
+
+def test_next_active_day():
+    t = fc.Task("A", 5, repeat={"kind": "days", "days": ["mon"]})
+    assert fc.next_active_day(t, date(2026, 10, 12)) == date(2026, 10, 19)
+    e = fc.Task("A", 5, repeat={"kind": "every", "every": 3, "anchor": "2026-10-12"})
+    assert fc.next_active_day(e, date(2026, 10, 12)) == date(2026, 10, 15)
+    assert fc.next_active_day(e, date(2026, 10, 1)) == date(2026, 10, 12)
+    assert fc.next_active_day(fc.Task("A", 5), date(2026, 10, 12)) is None
+
+
+def test_complete_repeat_logs_that_days_copy_and_sleeps_the_task():
+    t = fc.Task("Walk", 15, "outside", 120.0, folder="Health", repeat={"kind": "daily"})
+    now = datetime(2026, 10, 12, 18, 5)
+    d = fc.complete_repeat(t, now, 14)
+    assert d.id == uuid.uuid5(fc.NS, "rep:" + t.id + "#2026-10-12").hex
+    assert (d.name, d.estimate_min, d.actual_min, d.finished_at, d.details, d.folder) == \
+           ("Walk", 15, 14, "2026-10-12 18:05", "outside", "Health")
+    assert t.last_done == "2026-10-12" and t.spent_s == 0
+    assert not fc.is_active(t, now.date())
+
+
+# ---------- folders ----------
+
+def test_in_folder_matches_the_folder_and_its_subfolders():
+    t = fc.Task("A", 5, folder="Paper/Theory")
+    assert fc.in_folder(t, None) and fc.in_folder(t, "Paper") and fc.in_folder(t, "Paper/Theory")
+    assert not fc.in_folder(t, "Pap") and not fc.in_folder(t, "Paper/Theory/Deep")
+    assert not fc.in_folder(fc.Task("B", 5), "Paper") and fc.in_folder(fc.Task("B", 5), None)
+
+
+def test_folder_tree_includes_parents_and_sorts_children_under_parents():
+    tasks = [fc.Task("A", 5, folder="Teach/Fall/Week 1")]
+    assert fc.folder_tree(["Paper/Theory", "Paper B", "Paper"], tasks) == [
+        ("Paper", 0), ("Paper/Theory", 1), ("Paper B", 0), ("Teach", 0), ("Teach/Fall", 1), ("Teach/Fall/Week 1", 2)]
+
+
+def _folder_state():
+    tasks = [fc.Task("A", 5, folder="Paper"), fc.Task("B", 5, folder="Paper/Theory"), fc.Task("C", 5, folder="Papers"),
+             fc.Task("D", 5)]
+    done = [fc.DoneTask("E", 5, 5, "2026-10-01 09:00", folder="Paper/Theory")]
+    return fc.State(fc.Plan(tasks), 0, fc.TimerState(), done=done, folders=["Paper", "Paper/Theory", "Papers"])
+
+
+def test_rename_folder_moves_subfolders_tasks_and_done():
+    st = _folder_state()
+    fc.rename_folder(st, "Paper", "Culture/Paper")
+    assert st.folders == ["Culture/Paper", "Culture/Paper/Theory", "Papers", "Culture"]
+    assert [t.folder for t in st.plan.tasks] == ["Culture/Paper", "Culture/Paper/Theory", "Papers", None]
+    assert st.done[0].folder == "Culture/Paper/Theory"
+
+
+def test_delete_folder_removes_subfolders_and_unfiles_their_tasks():
+    st = _folder_state()
+    fc.delete_folder(st, "Paper")
+    assert st.folders == ["Papers"]
+    assert [t.folder for t in st.plan.tasks] == [None, None, "Papers", None]
+
+
+# ---------- tools/migrate_state.py ----------
+
+def _migrate_tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "migrate_state", Path(__file__).resolve().parents[1] / "tools" / "migrate_state.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_migrate_tool_writes_v3_and_never_overwrites(tmp_path):
+    src, out = tmp_path / "in.json", tmp_path / "out.json"
+    src.write_text(json.dumps(_v2_doc()), encoding="utf-8")
+    before = src.read_text(encoding="utf-8")
+    tool = _migrate_tool()
+    assert tool.main([str(src), str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8")) == fc.migrate_doc(_v2_doc())
+    assert src.read_text(encoding="utf-8") == before
+    written = out.read_text(encoding="utf-8")
+    assert tool.main([str(src), str(out)]) != 0  # OUT exists: refused
+    assert out.read_text(encoding="utf-8") == written
+    assert tool.main([str(src), str(src)]) != 0

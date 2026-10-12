@@ -1,0 +1,59 @@
+{
+  "description": "finish_by(date, buffer_days): step back one day at a time and count only Mon-Fri days until buffer_days are counted.",
+  "cases": [
+    {
+      "description": "Fri -> Wed",
+      "date": "2026-10-16",
+      "buffer_days": 2,
+      "expected": "2026-10-14"
+    },
+    {
+      "description": "Mon -> Thu",
+      "date": "2026-10-19",
+      "buffer_days": 2,
+      "expected": "2026-10-15"
+    },
+    {
+      "description": "Sat -> Thu",
+      "date": "2026-10-17",
+      "buffer_days": 2,
+      "expected": "2026-10-15"
+    },
+    {
+      "description": "Sun -> Thu",
+      "date": "2026-10-18",
+      "buffer_days": 2,
+      "expected": "2026-10-15"
+    },
+    {
+      "description": "Wed -> Mon",
+      "date": "2026-10-14",
+      "buffer_days": 2,
+      "expected": "2026-10-12"
+    },
+    {
+      "description": "Tue -> Fri",
+      "date": "2026-10-20",
+      "buffer_days": 2,
+      "expected": "2026-10-16"
+    },
+    {
+      "description": "buffer 0 keeps the date",
+      "date": "2026-10-16",
+      "buffer_days": 0,
+      "expected": "2026-10-16"
+    },
+    {
+      "description": "Mon minus 1 -> Fri",
+      "date": "2026-10-19",
+      "buffer_days": 1,
+      "expected": "2026-10-16"
+    },
+    {
+      "description": "buffer 0 on a Sunday keeps Sunday",
+      "date": "2026-10-18",
+      "buffer_days": 0,
+      "expected": "2026-10-18"
+    }
+  ]
+}

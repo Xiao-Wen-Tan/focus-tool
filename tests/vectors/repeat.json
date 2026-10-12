@@ -1,0 +1,303 @@
+{
+  "description": "is_active(task, day): non-repeating -> true. Otherwise the rule matches the day and last_done != day. 'every': (day - anchor) in days >= 0 and divisible by every.",
+  "cases": [
+    {
+      "description": "not repeating: always active",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": true
+    },
+    {
+      "description": "daily on a Saturday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": true
+    },
+    {
+      "description": "daily, done today",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": "2026-10-12",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-12",
+      "expected": false
+    },
+    {
+      "description": "daily, done yesterday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": "2026-10-12",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-13",
+      "expected": true
+    },
+    {
+      "description": "weekdays on Monday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "weekdays"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-12",
+      "expected": true
+    },
+    {
+      "description": "weekdays on Saturday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "weekdays"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": false
+    },
+    {
+      "description": "chosen days mon+thu on Thursday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "days",
+          "days": [
+            "mon",
+            "thu"
+          ]
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-15",
+      "expected": true
+    },
+    {
+      "description": "chosen days mon+thu on Tuesday",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "days",
+          "days": [
+            "mon",
+            "thu"
+          ]
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-13",
+      "expected": false
+    },
+    {
+      "description": "every 2 days: anchor day",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-12",
+      "expected": true
+    },
+    {
+      "description": "every 2 days: day before the anchor",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-11",
+      "expected": false
+    },
+    {
+      "description": "every 2 days: odd gap",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-13",
+      "expected": false
+    },
+    {
+      "description": "every 2 days: 10/14 even though never done",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-14",
+      "expected": true
+    },
+    {
+      "description": "every 2 days: 10/16 after 10/14 was skipped",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": "2026-10-12",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-16",
+      "expected": true
+    },
+    {
+      "description": "every 2 days: done on the anchor day",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 2,
+          "anchor": "2026-10-12"
+        },
+        "last_done": "2026-10-12",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-12",
+      "expected": false
+    }
+  ]
+}

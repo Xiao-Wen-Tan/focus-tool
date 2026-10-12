@@ -1,0 +1,141 @@
+{
+  "description": "reorder_ranked(tasks, ranked_ids) -> ids of the new full list. Ranked tasks are refilled into the slots ranked tasks held, in ranked_ids order; dated tasks stay put.",
+  "cases": [
+    {
+      "description": "dated task keeps its slot",
+      "tasks": [
+        {
+          "id": "a",
+          "name": "A",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "b",
+          "name": "B",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-16",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "c",
+          "name": "C",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "d",
+          "name": "D",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "ranked_ids": [
+        "d",
+        "a",
+        "c"
+      ],
+      "expected": [
+        "d",
+        "b",
+        "a",
+        "c"
+      ]
+    },
+    {
+      "description": "ranked ids left out follow in their old order; unknown and dated ids are ignored",
+      "tasks": [
+        {
+          "id": "a",
+          "name": "A",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "b",
+          "name": "B",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "x",
+          "name": "X",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": "2026-10-20",
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "c",
+          "name": "C",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "ranked_ids": [
+        "c",
+        "zz",
+        "x"
+      ],
+      "expected": [
+        "c",
+        "a",
+        "x",
+        "b"
+      ]
+    }
+  ]
+}
