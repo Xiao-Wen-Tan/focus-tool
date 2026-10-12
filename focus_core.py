@@ -36,6 +36,10 @@ DEFAULT_PLANNER = {
 TOMBSTONE_DAYS = 60
 
 
+class NewerVersionError(ValueError):
+    """The state file was written by a newer version of the app. Never replace it with an empty list."""
+
+
 def now_iso() -> str:
     """UTC time as 'YYYY-MM-DDTHH:MM:SS.mmmZ', the same text JavaScript's toISOString() gives."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -395,7 +399,7 @@ def _fill_task(x: dict, nth: int) -> dict:
 def _fill_done(x: dict) -> dict:
     out = {"id": x.get("id") or _migrated_id("done", f"{x['name']}#{x.get('finished_at', '')}")}
     for k in _DONE_FIELDS:
-        out[k] = x.get(k, "" if k == "details" else None)
+        out[k] = x.get(k, "" if k in ("details", "finished_at") else None)
     out["updated_at"] = x.get("updated_at") or EPOCH
     return out
 
@@ -407,13 +411,16 @@ def migrate_doc(d: dict) -> dict:
     task id = uuid5(NS, "task:" + name + "#" + n) where n counts earlier tasks with the same name (0, 1, ...),
     done id = uuid5(NS, "done:" + name + "#" + finished_at). The timer's task_id is the task at the saved
     index if its name matches the timer's task, else the first task with that name. Stamps start at EPOCH.
-    Raises ValueError if the version is newer than 3.
+    Raises NewerVersionError if the version is newer than 3, ValueError if it is not a number.
     """
     if not isinstance(d, dict):
         raise ValueError("state document is not an object")
-    version = int(d.get("version", 1))
+    try:
+        version = int(d.get("version", 1))
+    except (TypeError, ValueError) as ex:
+        raise ValueError(f"state version is not a number: {d.get('version')!r}") from ex
     if version > STATE_VERSION:
-        raise ValueError(f"state version {version} is newer than this app understands ({STATE_VERSION})")
+        raise NewerVersionError(f"state version {version} is newer than this app understands ({STATE_VERSION})")
     seen: dict = {}
     tasks = []
     for x in d.get("plan", {}).get("tasks", []):
@@ -474,17 +481,23 @@ def save_state(path: Path, plan: Plan, current_index: int, timer: TimerState, ge
 
 def parse_state(text: str) -> State:
     """Read the saved JSON text. Raises ValueError if it is not a complete state file (say, half synced)
-    or if it was written by a newer version."""
+    or NewerVersionError if it was written by a newer version."""
     try:
         return doc_to_state(json.loads(text))
+    except NewerVersionError:
+        raise
     except (AttributeError, KeyError, TypeError, ValueError) as ex:
         raise ValueError(f"not a complete state file: {ex}") from ex
 
 
 def load_state(path: Path) -> State:
+    """The saved State; an empty one if the file is missing or incomplete. A file from a newer version
+    raises NewerVersionError, so the caller never saves an empty list over it."""
     path = Path(path)
     try:
         return parse_state(path.read_text(encoding="utf-8"))
+    except NewerVersionError:
+        raise
     except (OSError, ValueError):
         return State(Plan(), 0, TimerState())
 
@@ -726,6 +739,15 @@ def complete_repeat(task: Task, now: datetime, actual_min: int) -> DoneTask:
     task.last_done = day
     task.spent_s = 0.0
     return rec
+
+
+def finish_task(task: Task, now: datetime, actual_min: int) -> DoneTask:
+    """The done entry for finishing `task`. It keeps the task's id, so a merge drops the task from the list
+    even if another device edited it meanwhile. A repeating task goes through complete_repeat instead."""
+    if task.repeat:
+        return complete_repeat(task, now, actual_min)
+    return DoneTask(task.name, task.estimate_min, int(actual_min), f"{now:%Y-%m-%d %H:%M}", task.details,
+                    id=task.id, deadline=task.deadline, target=task.target, folder=task.folder)
 
 
 # ---------------------------------------------------------------- folders

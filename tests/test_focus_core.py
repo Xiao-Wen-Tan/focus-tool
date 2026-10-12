@@ -568,3 +568,58 @@ def test_migrate_tool_writes_v3_and_never_overwrites(tmp_path):
     assert tool.main([str(src), str(out)]) != 0  # OUT exists: refused
     assert out.read_text(encoding="utf-8") == written
     assert tool.main([str(src), str(src)]) != 0
+
+
+# ---------- fix round 1 ----------
+
+def test_load_state_raises_for_a_newer_version_instead_of_returning_an_empty_state(tmp_path):
+    d = fc.migrate_doc(_v2_doc())
+    d["version"] = 4
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(fc.NewerVersionError):
+        fc.load_state(p)
+    with pytest.raises(fc.NewerVersionError):
+        fc.parse_state(json.dumps(d))
+    assert issubclass(fc.NewerVersionError, ValueError)
+
+
+def test_load_state_still_returns_empty_state_for_a_half_synced_file(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text('{"version": 3, "plan": {"tas', encoding="utf-8")
+    assert fc.load_state(p).plan.tasks == []
+
+
+def test_finish_task_reuses_the_task_id_and_copies_fields():
+    t = fc.Task("Alpha", 30, "notes", 600.0, deadline="2026-10-16", target="2026-10-15", folder="Paper")
+    d = fc.finish_task(t, datetime(2026, 10, 12, 15, 2), 40)
+    assert d.id == t.id
+    assert (d.name, d.estimate_min, d.actual_min, d.finished_at, d.details, d.deadline, d.target, d.folder) == \
+           ("Alpha", 30, 40, "2026-10-12 15:02", "notes", "2026-10-16", "2026-10-15", "Paper")
+
+
+def test_finish_task_on_a_repeat_delegates_to_complete_repeat():
+    t = fc.Task("Walk", 15, repeat={"kind": "daily"})
+    d = fc.finish_task(t, datetime(2026, 10, 12, 18, 5), 14)
+    assert d.id == uuid.uuid5(fc.NS, "rep:" + t.id + "#2026-10-12").hex
+    assert t.last_done == "2026-10-12"
+
+
+def test_done_without_finished_at_still_merges():
+    a = fc.migrate_doc(_v2_doc())
+    del a["done"][0]["finished_at"]
+    b = fc.migrate_doc(_v2_doc())
+    b["done"] = [{"id": "d2", "name": "Delta", "estimate_min": 5, "actual_min": 5, "finished_at": "2026-10-02 09:00"}]
+    m = fc.merge_docs(a, b)
+    assert [d["finished_at"] for d in m["done"]] == ["", "2026-10-02 09:00"]
+
+
+@pytest.mark.parametrize("bad", [None, "three", [3]])
+def test_bad_version_raises_value_error(bad):
+    d = fc.migrate_doc(_v2_doc())
+    d["version"] = bad
+    good = fc.migrate_doc(_v2_doc())
+    with pytest.raises(ValueError):
+        fc.merge_docs(d, good)
+    with pytest.raises(ValueError):
+        fc.stamp_changes(good, d, "2026-10-12T15:00:00.000Z")
