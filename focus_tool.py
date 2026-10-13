@@ -119,6 +119,24 @@ def _file_sig(path: Path) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
+RECENT_S = 5.0  # a file saved this recently is compared by its text too (see file_changed)
+
+
+def file_changed(path: Path, sig: tuple[int, int] | None, text: str | None) -> bool:
+    """True if `path` differs from the copy last read or written (`sig`, `text`). Two saves in the same
+    file-time tick with the same size give the same sig, so a file saved in the last few seconds is also
+    compared by its text. These files are small, so that read is cheap."""
+    now_sig = _file_sig(path)
+    if now_sig != sig:
+        return True
+    if now_sig is None or text is None or time.time() - now_sig[0] / 1e9 > RECENT_S:
+        return False
+    try:
+        return path.read_text(encoding="utf-8") != text
+    except OSError:
+        return False
+
+
 def _read_json(path: Path) -> dict:
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
@@ -128,9 +146,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, d: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _write_atomic(path, json.dumps(d, indent=2))
 
 
 def merge_old_local_data(local: Path, shared: Path) -> dict | None:
@@ -223,11 +239,20 @@ def same_doc(a: dict | None, b: dict | None) -> bool:
     return _comparable(a) == _comparable(b)
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def _write_atomic(path: Path, text: str, tries: int = 4) -> None:
+    """Write a temp file, then swap it in. Windows refuses the swap while another program (often a virus
+    scanner) has the file open for a moment, so a refused swap is tried again a few times."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    for attempt in range(tries):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.05)
 
 
 def read_sync_cache(path: Path) -> dict:
@@ -249,20 +274,31 @@ def store_local_doc(cache_path: Path, doc: dict, unsynced: bool) -> None:
         pass
 
 
-def run_job(job: tuple) -> dict:
-    """Do one piece of GitHub work (network, so never on the Qt thread except in tests).
-    ("sync", engine, doc) syncs the list and then reads day-plan.json. ("put_plan", engine, plan) uploads
-    a day plan. Returns a result dict for FocusWidget._apply_job_result."""
-    kind, engine = job[0], job[1]
+def run_job(job: dict) -> dict:
+    """Do one piece of GitHub work (network, so never on the Qt thread except in tests) and return a
+    result for FocusWidget._apply_job_result. Kinds are "sync" (sync job["doc"], then read
+    day-plan.json), "put_plan" (upload job["plan"]) and "forget" (delete job["paths"], used after a
+    Disconnect). A job whose job["cancel"] event is set does nothing more and its result is ignored."""
+    kind, engine, cancel = job["kind"], job.get("engine"), job.get("cancel")
     out = {"kind": kind, "engine": engine}
+    if kind == "forget":
+        for path in job["paths"]:
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+        return out
+    if cancel is not None and cancel.is_set():
+        out["cancelled"] = True
+        return out
     if kind == "put_plan":
         try:
-            gh_store.put_day_plan(engine.store, job[2])
+            gh_store.put_day_plan(engine.store, job["plan"])
             out["error"] = None
         except Exception as ex:
             out["error"] = _short(ex)
         return out
-    doc = job[2]
+    doc = job["doc"]
     store_local_doc(engine.cache_path, doc, True)
     try:
         res = engine.sync(doc)
@@ -271,6 +307,9 @@ def run_job(job: tuple) -> dict:
         return out
     except Exception as ex:  # a bug or an odd answer must never stop the app
         res = gh_store.SyncResult(doc, False, False, "error", _short(ex), None)
+    if cancel is not None and cancel.is_set():
+        out["cancelled"] = True  # disconnected meanwhile; the "forget" job after this one cleans up
+        return out
     out["result"] = res
     store_local_doc(engine.cache_path, res.doc, res.status != "ok")
     if res.status == "ok":
@@ -1546,7 +1585,9 @@ class FocusWidget(QWidget):
         self._shared_dirty = False  # True while a change has not reached the shared file yet
         self._last_doc: dict | None = None  # the list as last read or written; changes are stamped against it
         self._stamp_import = False  # True after reading a file older than version 3 (see _stamped_doc)
-        self._blocked = False  # True once the shared file turned out to be from a newer app, so it is never written
+        self._box_blocked = False  # the Box file is from a newer app, so Box mode never writes it
+        self._gh_blocked = False  # the GitHub list is from a newer app, so GitHub mode stops syncing
+        self._auth_blocked = False  # GitHub rejected the token; no automatic syncs until a new one is saved
         self.status_message = ""  # a warning for the panel header and the tray tooltip
         self.mode = "box"  # "github" when local.json names a repo and a token is saved
         self.sync_status = ""  # GitHub mode, such as "Synced 18:42"
@@ -1554,6 +1595,8 @@ class FocusWidget(QWidget):
         self._jobs: queue.Queue = queue.Queue()  # work for the sync thread
         self._results: queue.Queue = queue.Queue()  # its answers, applied by on_tick on the Qt thread
         self._job_lock = threading.Lock()  # one GitHub job at a time (they share the cache file)
+        self._cancel = threading.Event()  # set when GitHub mode ends; its queued jobs then do nothing
+        self.pending_path = self.local_path.parent / "github-pending.json"  # edits not yet pushed
         self._worker: threading.Thread | None = None
         self._job_pending = False  # a sync job is queued or running
         self._sync_due: float | None = None  # time.monotonic() when a change should be pushed
@@ -1563,6 +1606,7 @@ class FocusWidget(QWidget):
         self.day_plan: dict | None = None
         self.plan_path = shared / "day-plan.json"
         self._plan_sig: tuple[int, int] | None = None
+        self._plan_text: str | None = None
         self._read_day_plan()
         self._day = self.today()
         got = self._read_shared()
@@ -1676,10 +1720,20 @@ class FocusWidget(QWidget):
     def _emit_status(self, alert: bool):
         self.status_changed.emit("\n".join(x for x in (self.sync_status, self.status_message) if x), alert)
 
-    def _block_newer(self):
-        """The list was saved by a newer app. Say so, and from now on never write it (until restart)."""
-        self._blocked = True
-        self._set_status(NEWER_FILE_MESSAGE)
+    @property
+    def _blocked(self) -> bool:
+        """True when the list of the current mode was saved by a newer app, so nothing may be written."""
+        return self._gh_blocked if self.mode == "github" else self._box_blocked
+
+    def _block_newer(self, github: bool = False):
+        """The Box file (or with `github`, the GitHub list) was saved by a newer app. Never write it again
+        until restart, and say so while that list is the one in use."""
+        if github:
+            self._gh_blocked = True
+        else:
+            self._box_blocked = True
+        if self._blocked:
+            self._set_status(NEWER_FILE_MESSAGE)
 
     # -- folders
     def state_obj(self) -> fc.State:
@@ -1761,7 +1815,7 @@ class FocusWidget(QWidget):
         GitHub mode never reads the Box copy; it syncs from on_tick instead."""
         if self.mode == "github":
             return
-        if _file_sig(self.plan_path) != self._plan_sig:
+        if file_changed(self.plan_path, self._plan_sig, self._plan_text):
             self._read_day_plan()
         if self._blocked:
             return
@@ -1770,7 +1824,7 @@ class FocusWidget(QWidget):
             return
         if QApplication.activeModalWidget() or QApplication.activePopupWidget():
             return  # a dialog or menu is holding tasks from the current list; look again once it closes
-        if _file_sig(self.state_path) == self._shared_sig:
+        if not file_changed(self.state_path, self._shared_sig, self._shared_text):
             return
         before = self._shared_text
         got = self._read_shared()
@@ -1924,7 +1978,10 @@ class FocusWidget(QWidget):
             d["github"] = self._gh_cfg  # owner, repo, branch; the token is in the Windows Credential Manager
         if self._gh_imported:
             d["github_imported"] = True
-        _write_json(self.local_path, d)
+        try:
+            _write_json(self.local_path, d)
+        except OSError:
+            pass  # the file is locked for longer than the retries; the next save writes it
 
     # -- building and writing the shared document (one place each)
     def build_doc(self) -> dict:
@@ -1966,8 +2023,7 @@ class FocusWidget(QWidget):
             self._commit_github()
             return
         doc = self._stamped_doc()
-        sig = _file_sig(self.state_path)
-        if sig is not None and sig != self._shared_sig:
+        if self.state_path.exists() and file_changed(self.state_path, self._shared_sig, self._shared_text):
             try:
                 disk = fc.migrate_doc(json.loads(self.state_path.read_text(encoding="utf-8")))
             except fc.NewerVersionError:
@@ -1993,16 +2049,30 @@ class FocusWidget(QWidget):
 
     # -- GitHub mode
     def _commit_github(self):
-        """Take a local change into the baseline, copy it to Box, and push it a moment later."""
+        """Take a local change into the baseline, keep it in github-pending.json at once, copy it to Box,
+        and push it a moment later."""
         doc = self._stamped_doc()
         if self._stamp_import or not same_doc(doc, self._last_doc):
             self._take_stamps(doc)
+            self._write_pending()
             self._write_mirror(doc)
             self._sync_due = time.monotonic() + SYNC_DEBOUNCE_S
         self._shared_dirty = False
 
+    def _write_pending(self):
+        """Keep this computer's whole list in %APPDATA%\\FocusTool\\github-pending.json. It is a small local
+        file written on the Qt thread, so an edit survives a crash or a quit even while a sync is stuck.
+        A start in GitHub mode merges it back in."""
+        try:
+            _write_atomic(self.pending_path, json.dumps(self._last_doc, ensure_ascii=False))
+        except OSError:
+            pass
+
     def _write_mirror(self, doc: dict):
-        """GitHub mode keeps data\\state.json in Box as a backup copy. It is written, never read."""
+        """GitHub mode keeps data\\state.json in Box as a backup copy. It is written, never read, and never
+        written over a file saved by a newer app."""
+        if self._box_blocked:
+            return
         st = fc.doc_to_state(doc)
         text = json.dumps(fc.state_to_doc(st), indent=2, ensure_ascii=False)
         if text == self._mirror_text:
@@ -2013,32 +2083,45 @@ class FocusWidget(QWidget):
             return  # Box is holding the file; the next change writes it
         self._mirror_text = text
 
-    def _start_github(self, token: str):
-        """Switch to GitHub mode. The starting list is the one kept in the sync cache (it holds edits not
-        pushed yet). On the first GitHub start of this computer, the Box list is merged in once."""
+    def _saved_github_docs(self, engine) -> list:
+        """The lists this computer kept for GitHub mode (pending edits, and the sync cache's copies)."""
+        cache = read_sync_cache(engine.cache_path)
+        found = []
+        for d in (read_sync_cache(self.pending_path), cache.get("local_doc")):
+            if isinstance(d, dict) and d:
+                found.append(d)
+        if not found and isinstance(cache.get("last_remote_doc"), dict):
+            found.append(cache["last_remote_doc"])
+        return found
+
+    def _start_github(self, token: str, running: bool = False):
+        """Switch to GitHub mode. The starting list merges the edits kept for GitHub mode (pending file and
+        sync cache). When the app is already running (`running`), the list on screen is merged in too, so
+        nothing typed before connecting is lost. On the first GitHub start of this computer, the Box list
+        is merged in once."""
         try:
             engine = make_sync_engine({**self._gh_cfg, "token": token})
         except Exception as ex:
             self._set_sync_status(f"Sync error: {_short(ex)}")
             return
         if self._shared_dirty:
-            self._save_shared()  # still Box mode here, so this finishes the last Box write
-        self.stop_sync()
+            self._save_shared()  # finish the last write in the mode we are leaving
+        self._end_session(delete_files=False)
         self._engine, self.mode = engine, "github"
-        self._jobs, self._results = queue.Queue(), queue.Queue()
+        self._jobs, self._results, self._cancel = queue.Queue(), queue.Queue(), threading.Event()
         self._job_pending, self._sync_due, self._last_sync_at = False, None, float("-inf")
-        cache = read_sync_cache(engine.cache_path)
+        self._auth_blocked, self._gh_blocked = False, False
         start = None
-        for key in ("local_doc", "last_remote_doc"):
-            if isinstance(cache.get(key), dict):
-                try:
-                    start = fc.migrate_doc(cache[key])
-                    break
-                except fc.NewerVersionError:
-                    self._block_newer()
-                    return
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    continue
+        for d in self._saved_github_docs(engine):
+            try:
+                start = fc.merge_docs(start, d) if start is not None else fc.migrate_doc(d)
+            except fc.NewerVersionError:
+                self._block_newer(github=True)
+                return
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+        if running and start is not None:
+            start = fc.merge_docs(start, self._last_doc)
         if not self._gh_imported:
             box = self.build_doc()  # the list read from Box
             start = fc.merge_docs(start, box) if start is not None else fc.migrate_doc(box)
@@ -2046,62 +2129,73 @@ class FocusWidget(QWidget):
             self._stamp_import = True  # fresh order, folder and timer stamps on the merged list
         if start is not None and not same_doc(start, self._last_doc):
             self._apply_state(fc.doc_to_state(start), baseline=start)
+        if self.status_message == NEWER_FILE_MESSAGE:
+            self._set_status("")  # a newer Box file only matters in Box mode
         self._save_local()
-        if self._stamp_import:
-            self._shared_dirty = True
-            self._save_shared()
-            with self._job_lock:
-                store_local_doc(engine.cache_path, self._last_doc, True)  # keep the import even if we crash now
+        self._shared_dirty = True
+        self._save_shared()  # commits the import stamps, if any
+        self._write_pending()
         self._set_sync_status("Connecting to GitHub...")
 
     def connect_github(self, cfg: dict, token: str):
-        """Use GitHub from now on (the GitHub sync dialog's Save)."""
+        """Use GitHub from now on (the GitHub sync dialog's Save, also after a rejected token)."""
         cfg = {k: str(cfg.get(k) or "") for k in ("owner", "repo", "branch")}
         cfg["branch"] = cfg["branch"] or "main"
         if self.mode == "github" and cfg != self._gh_cfg:
-            self._forget_cache()  # the cache of another repo does not apply
+            self._end_session(delete_files=True)  # the saved copies of another repo do not apply
         self._gh_cfg = cfg
         self._save_local()
-        self._start_github(token)
+        self._start_github(token, running=True)
 
     def disconnect_github(self):
-        """Go back to Box mode and forget the token and the repo. The list stays as it is and is saved to Box."""
+        """Go back to Box mode and forget the token and the repo. The list stays as it is and is saved to Box.
+        Queued GitHub work is cancelled, a running sync is left to finish on its own with its result ignored,
+        and the saved GitHub copies are deleted (again after that sync, so it cannot bring them back)."""
         try:
             gh_store.delete_token()
         except Exception:
             pass
-        self.stop_sync()
-        self._forget_cache()
+        self._end_session(delete_files=True)
         self._engine, self.mode, self._gh_cfg, self._gh_imported = None, "box", None, False
+        self._auth_blocked = False
         self._save_local()
         self._set_sync_status("")
+        if self._box_blocked:
+            self._set_status(NEWER_FILE_MESSAGE)
         self._shared_sig, self._shared_text = _file_sig(self.state_path), self._mirror_text
         self._mirror_text = None
         if self.panel.isVisible():
             self.panel.refresh()
 
-    def _forget_cache(self):
-        if self._engine is not None:
-            with self._job_lock:
-                try:
-                    self._engine.cache_path.unlink()
-                except OSError:
-                    pass
+    def _end_session(self, delete_files: bool):
+        """Stop GitHub work without waiting. Cancels queued jobs; the worker finishes a running one,
+        then (with `delete_files`) deletes the cache and pending files, then stops."""
+        self._cancel.set()
+        while True:
+            try:
+                self._jobs.get_nowait()
+            except queue.Empty:
+                break
+        paths = [self.pending_path] + ([self._engine.cache_path] if self._engine is not None else [])
+        if delete_files:
+            if self._worker is not None:
+                self._jobs.put({"kind": "forget", "paths": paths})
+            run_job({"kind": "forget", "paths": paths})  # now too, in case no job is running
+        self.stop_sync()
+        self._job_pending = False
 
     def stop_sync(self):
-        """Stop the sync thread (it finishes the job it is doing)."""
+        """Stop the sync thread (it finishes the job it is doing first)."""
         if self._worker is not None:
             self._jobs.put(None)
             self._worker = None
 
     def shutdown(self):
-        """On quit, save, keep unpushed edits in the sync cache, and stop the sync thread."""
+        """On quit, save, keep unpushed edits in github-pending.json, and stop the sync thread. Never waits
+        for a sync that is still running."""
         self.save()
-        if self.mode == "github" and self._engine is not None and self._job_lock.acquire(timeout=1.0):
-            try:
-                store_local_doc(self._engine.cache_path, self._last_doc, True)
-            finally:
-                self._job_lock.release()
+        if self.mode == "github":
+            self._write_pending()
         self.stop_sync()
 
     def _ensure_worker(self):
@@ -2120,6 +2214,9 @@ class FocusWidget(QWidget):
             with lock:
                 results.put(run_job(job))
 
+    def _job(self, kind: str, **data) -> dict:
+        return {"kind": kind, "engine": self._engine, "cancel": self._cancel, **data}
+
     def kick_sync(self):
         """Queue a sync of the list as it is now."""
         if self.mode != "github" or self._blocked or self._engine is None:
@@ -2128,15 +2225,16 @@ class FocusWidget(QWidget):
             self._save_shared()
         if self.AUTO_SYNC:
             self._ensure_worker()
-        self._jobs.put(("sync", self._engine, copy.deepcopy(self._last_doc)))
+        self._jobs.put(self._job("sync", doc=copy.deepcopy(self._last_doc)))
         self._job_pending, self._sync_due, self._last_sync_at = True, None, time.monotonic()
 
     def _sync_tick(self):
-        """Called by on_tick. Applies finished sync results and starts a sync when one is due."""
+        """Called by on_tick. Applies finished sync results and starts a sync when one is due. After a
+        rejected token it waits until a new token is saved."""
         if self.mode != "github":
             return
         self.drain_sync_results()
-        if self._blocked or not self.AUTO_SYNC or self._job_pending:
+        if self._blocked or self._auth_blocked or not self.AUTO_SYNC or self._job_pending:
             return
         due = self._sync_due if self._sync_due is not None else self._last_sync_at + SYNC_POLL_S
         if time.monotonic() >= max(due, self._sync_not_before):
@@ -2166,7 +2264,7 @@ class FocusWidget(QWidget):
             self.drain_sync_results()
             if self._shared_dirty:
                 self._save_shared()
-            out = run_job(("sync", self._engine, copy.deepcopy(self._last_doc)))
+            out = run_job(self._job("sync", doc=copy.deepcopy(self._last_doc)))
         out["inline"] = True
         self._last_sync_at = time.monotonic()
         self._apply_job_result(out)
@@ -2175,16 +2273,16 @@ class FocusWidget(QWidget):
     def _apply_job_result(self, out: dict):
         """On the Qt thread, merge what GitHub had with the list as it is now (it may have changed while
         the sync ran), show the result, copy it to Box, and say how the sync went."""
-        if out["kind"] == "sync" and not out.get("inline"):
+        if out["kind"] == "sync" and not out.get("inline") and out["engine"] is self._engine:
             self._job_pending = False
-        if out["engine"] is not self._engine or self.mode != "github":
+        if out["engine"] is not self._engine or self.mode != "github" or out.get("cancelled"):
             return  # from before a disconnect or a switch to another repo
         if out["kind"] == "put_plan":
             if out["error"]:
                 self._set_sync_status(f"Sync error: {out['error']}")
             return
         if out.get("newer"):
-            self._block_newer()
+            self._block_newer(github=True)
             return
         res: gh_store.SyncResult = out["result"]
         if self._shared_dirty:
@@ -2192,14 +2290,16 @@ class FocusWidget(QWidget):
         try:
             merged = fc.merge_docs(self._last_doc, res.doc)
         except fc.NewerVersionError:
-            self._block_newer()
+            self._block_newer(github=True)
             return
         if not same_doc(merged, self._last_doc):
             self._apply_state(fc.doc_to_state(merged), baseline=merged)
+            self._write_pending()
         if res.status == "ok" and not same_doc(merged, res.doc):
             self._sync_due = time.monotonic()  # edits made during the sync still need pushing
         self._write_mirror(self._last_doc)
         now = datetime.now()
+        self._auth_blocked = res.status == "auth"
         if res.status == "ok":
             self._set_sync_status(f"Synced {now:%H:%M}")
         elif res.status == "offline":
@@ -2220,13 +2320,14 @@ class FocusWidget(QWidget):
         """Read data\\day-plan.json (Box mode, and at start). A half-synced file is skipped until it is whole."""
         sig = _file_sig(self.plan_path)
         if sig is None:
-            self._plan_sig = None
+            self._plan_sig = self._plan_text = None
             return
         try:
-            plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+            text = self.plan_path.read_text(encoding="utf-8")
+            plan = json.loads(text)
         except (OSError, ValueError):
             return
-        self._plan_sig = sig
+        self._plan_sig, self._plan_text = sig, text
         if isinstance(plan, dict):
             self._set_day_plan(plan, mirror=False, force=True)
 
@@ -2241,7 +2342,7 @@ class FocusWidget(QWidget):
             try:
                 if not self.plan_path.exists() or self.plan_path.read_text(encoding="utf-8") != text:
                     _write_atomic(self.plan_path, text)
-                self._plan_sig = _file_sig(self.plan_path)
+                self._plan_sig, self._plan_text = _file_sig(self.plan_path), text
             except OSError:
                 pass
         if fc.canonical(plan) != fc.canonical(old):
@@ -2264,6 +2365,8 @@ class FocusWidget(QWidget):
         if self._shared_dirty:
             self._save_shared()
         tz = (self.planner or {}).get("tz") or "America/Chicago"
+        # datetime.now() is the PC clock. Reading it as local time in the planner's time zone assumes the
+        # PC is set to that zone (America/Chicago by default), as the user's computers are.
         try:
             plan = planner.plan_from_doc(self.build_doc(), local_to_utc(datetime.now(), tz), "now", by="desktop")
         except Exception as ex:  # for example a date another device saved oddly
@@ -2275,7 +2378,7 @@ class FocusWidget(QWidget):
         if self.mode == "github" and self._engine is not None:
             if self.AUTO_SYNC:
                 self._ensure_worker()
-            self._jobs.put(("put_plan", self._engine, plan))
+            self._jobs.put(self._job("put_plan", plan=plan))
 
     def set_working_hours(self, windows: dict):
         """New working hours for the planner, such as {"mon": ["09:00-12:00"], ...}."""

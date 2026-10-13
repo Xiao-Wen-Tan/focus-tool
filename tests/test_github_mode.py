@@ -7,6 +7,7 @@ gh_store's token functions are replaced, so the real Windows Credential Manager 
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -421,3 +422,159 @@ def test_malformed_dates_from_another_device_do_not_crash(env, clock):
     assert not a.panel.ed_deadline_on.isChecked()
     assert a.current_task() is not None
     a.replan_now()  # never raises; the planner's complaint goes to the status line
+
+
+# ---------- fix round 1 ----------
+
+def _make_slow(w):
+    """Make w's sync wait until `gate` is set; `entered` is set once a sync has started."""
+    gate, entered = threading.Event(), threading.Event()
+    real = w._engine.sync
+
+    def slow(doc):
+        entered.set()
+        gate.wait(10)
+        return real(doc)
+
+    w._engine.sync = slow
+    return gate, entered
+
+
+def test_a_rejected_token_stops_polling_until_a_new_token_is_saved(env):
+    env.tokens["t"] = "wrong-token"
+    a = env.computer("a")
+    assert a.sync_now().status == "auth"
+    a.AUTO_SYNC = True
+    add(a, "Alpha")
+    a._sync_due, a._last_sync_at = 0.0, float("-inf")
+    a._sync_tick()
+    assert not a._job_pending and a._jobs.empty()
+    a.AUTO_SYNC = False
+    env.tokens["t"] = "test-token"
+    a.connect_github({"owner": "me", "repo": "focus-data", "branch": "main"}, "test-token")
+    assert names(a) == ["Alpha"]  # the edit made after the 401 is still there
+    assert a.sync_now().status == "ok"
+    assert remote_names(env.fake) == ["Alpha"]
+
+
+def test_quitting_while_a_sync_is_stuck_keeps_the_edit(env):
+    a = env.computer("a")
+    a.sync_now()
+    gate, entered = _make_slow(a)
+    try:
+        a.AUTO_SYNC = True
+        a.kick_sync()
+        assert entered.wait(5)
+        add(a, "Alpha")
+        started = time.monotonic()
+        a.shutdown()
+        assert time.monotonic() - started < 2
+        again = env.computer("a")
+        assert names(again) == ["Alpha"]
+    finally:
+        gate.set()
+
+
+def test_an_edit_made_while_a_sync_runs_is_kept_and_pushed(env):
+    a = env.computer("a")
+    a.sync_now()
+    a.kick_sync()  # no worker in tests, so the job waits in the queue
+    add(a, "Beta")
+    a._apply_job_result(env.ft.run_job(a._jobs.get_nowait()))
+    assert names(a) == ["Beta"]
+    a.sync_now()
+    assert remote_names(env.fake) == ["Beta"]
+
+
+def test_disconnect_cancels_queued_and_running_jobs(env):
+    a = env.computer("a")
+    add(a, "Alpha")
+    a.sync_now()
+    folder = env.tmp / "a" / "FocusTool"
+    assert (folder / "github-cache.json").exists() and (folder / "github-pending.json").exists()
+    gate, entered = _make_slow(a)
+    try:
+        a.AUTO_SYNC = True
+        a.kick_sync()
+        assert entered.wait(5)
+        worker = a._worker
+        add(a, "Beta")
+        a.kick_sync()  # queued behind the stuck one
+        started = time.monotonic()
+        a.disconnect_github()
+        assert time.monotonic() - started < 2
+        assert a.mode == "box"
+    finally:
+        gate.set()
+    worker.join(10)
+    a.drain_sync_results()
+    assert "Beta" not in remote_names(env.fake)
+    assert not (folder / "github-cache.json").exists() and not (folder / "github-pending.json").exists()
+    assert a.mode == "box" and a.sync_status == ""
+
+
+def test_a_newer_box_file_does_not_block_github_mode(env):
+    env.box.mkdir(parents=True)
+    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    (env.box / "state.json").write_text(text, encoding="utf-8")
+    a = env.computer("a")
+    add(a, "Alpha")
+    assert a.sync_now().status == "ok"
+    assert remote_names(env.fake) == ["Alpha"]
+    assert (env.box / "state.json").read_text(encoding="utf-8") == text  # the newer file is left alone
+    assert a.status_message == ""
+    a.disconnect_github()
+    assert "newer Focus Tool" in a.status_message
+
+
+def test_a_same_size_rewrite_in_the_same_file_tick_is_seen(env, clock):
+    a = env.computer("a", github=False)
+    alpha = add(a, "Alpha", 30)
+    _write_plan(env, _plan("2026-10-12", [_block(alpha, "09:00", "09:30", 30)]))
+    a.check_shared()
+    path = env.box / "day-plan.json"
+    st = os.stat(path)
+    _write_plan(env, _plan("2026-10-12", [_block(alpha, "10:00", "10:30", 30)]))
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(path).st_size == st.st_size
+    a.check_shared()
+    assert a.day_plan["blocks"][0]["start"] == "10:00"
+
+
+def test_a_same_size_list_rewrite_in_the_same_file_tick_is_seen(env):
+    here, there = env.computer("a", github=False), env.computer("b", github=False)
+    add(there, "Alpha")
+    here.check_shared()
+    path = env.box / "state.json"
+    st = os.stat(path)
+    there.plan.tasks[0].name = "Omega"
+    there.changed()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(path).st_size == st.st_size
+    here.check_shared()
+    assert names(here) == ["Omega"]
+
+
+def test_a_briefly_locked_file_is_retried(env, monkeypatch):
+    calls, real = [], Path.replace
+
+    def flaky(self, target):  # a virus scanner can hold a new file for a moment on Windows
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PermissionError(5, "Access is denied")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky)
+    path = env.tmp / "x.json"
+    env.ft._write_atomic(path, "hi")
+    assert path.read_text(encoding="utf-8") == "hi" and len(calls) == 3
+
+
+def test_saving_the_window_position_never_raises(env, monkeypatch):
+    a = env.computer("a", github=False)
+
+    def locked(self, target):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(Path, "replace", locked)
+    a._save_local()  # the position is saved next time; the app must not stop
