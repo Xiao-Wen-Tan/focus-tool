@@ -68,6 +68,7 @@ automatic day plan that lays your tasks out against your working hours.
    | `+` | Add 5 minutes to the current task |
    | `D` or the check button | Done |
    | `Enter` or the menu button | Open the task panel |
+   | `P` or the calendar button | Open or close the Day plan window |
    | `M` or the minus button | Shrink to a small circle. One click on the circle expands it again (dragging it only moves it) |
    | `Esc` or the close button | Hide the widget. `Ctrl+Alt+F` or the tray icon brings it back |
 
@@ -113,8 +114,11 @@ Every evening around 7 pm (America/Chicago time), an automatic job looks at
 your working hours, your dated tasks and your repeating tasks, and lays out a
 plan for the next day, picking which task to work on, in which block of time,
 and for how long. You can see this in the **Plan** tab on your phone, or in
-the Plan card on the desktop panel. It shows warnings if something will not
-fit before its date.
+the **Day plan** window on the desktop. Open that window with the calendar
+button in the widget's hover buttons, the `P` key, or "Day plan..." in the
+tray menu, and click the button again to close it. It shows warnings if
+something will not fit before its date. Double-click a time block to start
+its task. The window remembers its size and position on each computer.
 
 You do not have to wait for the evening job. A **Re-plan now** button is
 available on both the phone and the desktop. Before 7 pm it plans the rest of

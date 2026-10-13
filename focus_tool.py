@@ -956,31 +956,6 @@ class TaskPanel(QWidget):
         tc.addLayout(trow)
         root.addWidget(task_card)
 
-        # -- the day plan made by the planner (on GitHub every evening, or with Re-plan now)
-        self.plan_card, pc = card("🗓 Day plan")
-        self.plan_heading = QLabel()
-        self.plan_heading.setObjectName("hint")
-        self.plan_heading.setWordWrap(True)
-        pc.addWidget(self.plan_heading)
-        self.plan_warn = QLabel()
-        self.plan_warn.setWordWrap(True)
-        self.plan_warn.setStyleSheet(f"color: {AMBER};")
-        self.plan_warn.hide()
-        pc.addWidget(self.plan_warn)
-        self.plan_list = QListWidget()
-        self.plan_list.setMinimumHeight(90)
-        self.plan_list.setToolTip("Double-click a block to start its task")
-        self.plan_list.itemDoubleClicked.connect(self._start_plan_item)
-        pc.addWidget(self.plan_list)
-        prow = QHBoxLayout()
-        prow.addStretch()
-        self.b_replan = QPushButton("Re-plan now")
-        self.b_replan.setToolTip("Plan the rest of today from now. After 7 pm it plans tomorrow.")
-        self.b_replan.clicked.connect(lambda: self.w.replan_now())
-        prow.addWidget(self.b_replan)
-        pc.addLayout(prow)
-        root.addWidget(self.plan_card)
-
         # -- which folder to show
         show = QHBoxLayout()
         show.addWidget(QLabel("Show"))
@@ -1081,36 +1056,6 @@ class TaskPanel(QWidget):
     def show_sync(self, text: str):
         self.sync_label.setText(text)
 
-    def refresh_plan(self):
-        """Show today's plan, or tomorrow's once it is made."""
-        plan = self.w.shown_plan()
-        self.plan_list.clear()
-        if plan is None:
-            self.plan_heading.setText("No plan yet. Re-plan now makes one for the rest of today.")
-            self.plan_warn.hide()
-            return
-        made = made_time(plan)
-        self.plan_heading.setText(f"Plan for {short_date(plan.get('date'))}" + (f", made {made}" if made else ""))
-        warns = [f"⚠ {x.get('name', '')} · {x.get('message', '')}" for x in plan.get("warnings") or []
-                 if isinstance(x, dict)]
-        self.plan_warn.setText("\n".join(warns))
-        self.plan_warn.setVisible(bool(warns))
-        names = {t.id: t.name for t in self.w.plan.tasks}
-        for b in plan.get("blocks") or []:
-            if not isinstance(b, dict):
-                continue
-            name = names.get(b.get("task_id"), b.get("name", ""))
-            item = QListWidgetItem(f"{b.get('start', '')}-{b.get('end', '')}  {name}  ({b.get('minutes', 0)}m)")
-            item.setData(Qt.UserRole, b.get("task_id"))
-            if b.get("task_id") not in names:
-                item.setForeground(QColor(self.w.s["colors"]["text_dim"]))  # finished or removed since
-            self.plan_list.addItem(item)
-
-    def _start_plan_item(self, item: QListWidgetItem):
-        t = self._task_by_id(item.data(Qt.UserRole))
-        if t is not None:
-            self.w.start_task(t)
-
     # -- refresh from model
     def showEvent(self, e):
         self.refresh()
@@ -1203,7 +1148,6 @@ class TaskPanel(QWidget):
         self._updating = False
         self.show_status(self.w.status_message)
         self.show_sync(self.w.sync_status)
-        self.refresh_plan()
         self._load_editor()
         self.update_toggle()
 
@@ -1549,6 +1493,96 @@ class TaskPanel(QWidget):
 
 # ---------------------------------------------------------------- the widget
 
+class DayPlanWindow(QWidget):
+    """The day plan made by the planner (on GitHub every evening, or with Re-plan now), in its own window."""
+
+    def __init__(self, widget: "FocusWidget"):
+        super().__init__(None, Qt.Tool | Qt.WindowStaysOnTopHint)
+        self.w = widget
+        self.setWindowTitle("Day plan")
+        self.setWindowIcon(QIcon(str(resource_dir() / "assets" / "icon.ico")))
+        self.setStyleSheet(panel_stylesheet(widget.s["colors"]))
+        self.resize(int(widget.ui.get("plan_w", 420)), int(widget.ui.get("plan_h", 420)))
+        if "plan_x" in widget.ui and "plan_y" in widget.ui:
+            at = QRect(int(widget.ui["plan_x"]), int(widget.ui["plan_y"]), self.width(), self.height())
+            if any(sc.availableGeometry().intersects(at) for sc in QApplication.screens()):
+                self.move(at.topLeft())  # only if that place is still on a screen
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 18)
+        root.setSpacing(12)
+        title = QLabel("🗓 Day plan")
+        title.setObjectName("title")
+        root.addWidget(title)
+
+        plan_card, pc = card("Time blocks")
+        self.plan_heading = QLabel()
+        self.plan_heading.setObjectName("hint")
+        self.plan_heading.setWordWrap(True)
+        pc.addWidget(self.plan_heading)
+        self.plan_warn = QLabel()
+        self.plan_warn.setWordWrap(True)
+        self.plan_warn.setStyleSheet(f"color: {AMBER};")
+        self.plan_warn.hide()
+        pc.addWidget(self.plan_warn)
+        self.plan_list = QListWidget()
+        self.plan_list.setMinimumHeight(90)
+        self.plan_list.setToolTip("Double-click a block to start its task")
+        self.plan_list.itemDoubleClicked.connect(self._start_plan_item)
+        pc.addWidget(self.plan_list, 1)
+        prow = QHBoxLayout()
+        prow.addStretch()
+        self.b_replan = QPushButton("Re-plan now")
+        self.b_replan.setToolTip("Plan the rest of today from now. After 7 pm it plans tomorrow.")
+        self.b_replan.clicked.connect(lambda: self.w.replan_now())
+        prow.addWidget(self.b_replan)
+        pc.addLayout(prow)
+        root.addWidget(plan_card, 1)
+
+    def refresh_plan(self):
+        """Show today's plan, or tomorrow's once it is made."""
+        plan = self.w.shown_plan()
+        self.plan_list.clear()
+        if plan is None:
+            self.plan_heading.setText("No plan yet. Re-plan now makes one for the rest of today.")
+            self.plan_warn.hide()
+            return
+        made = made_time(plan)
+        self.plan_heading.setText(f"Plan for {short_date(plan.get('date'))}" + (f", made {made}" if made else ""))
+        warns = [f"⚠ {x.get('name', '')} · {x.get('message', '')}" for x in plan.get("warnings") or []
+                 if isinstance(x, dict)]
+        self.plan_warn.setText("\n".join(warns))
+        self.plan_warn.setVisible(bool(warns))
+        names = {t.id: t.name for t in self.w.plan.tasks}
+        for b in plan.get("blocks") or []:
+            if not isinstance(b, dict):
+                continue
+            name = names.get(b.get("task_id"), b.get("name", ""))
+            item = QListWidgetItem(f"{b.get('start', '')}-{b.get('end', '')}  {name}  ({b.get('minutes', 0)}m)")
+            item.setData(Qt.UserRole, b.get("task_id"))
+            if b.get("task_id") not in names:
+                item.setForeground(QColor(self.w.s["colors"]["text_dim"]))  # finished or removed since
+            self.plan_list.addItem(item)
+
+    def _start_plan_item(self, item: QListWidgetItem):
+        t = next((t for t in self.w.plan.tasks if t.id == item.data(Qt.UserRole)), None)
+        if t is not None:
+            self.w.start_task(t)
+
+    def showEvent(self, e):
+        self.refresh_plan()
+        super().showEvent(e)
+
+    def resizeEvent(self, e):
+        self.w.ui["plan_w"], self.w.ui["plan_h"] = self.width(), self.height()
+        super().resizeEvent(e)
+
+    def moveEvent(self, e):
+        if self.isVisible():
+            self.w.ui["plan_x"], self.w.ui["plan_y"] = self.x(), self.y()
+        super().moveEvent(e)
+
+
 class FocusWidget(QWidget):
     # Sync status and warnings for the tray, as (tooltip text, True to also pop up a notice)
     status_changed = Signal(str, bool)
@@ -1643,6 +1677,7 @@ class FocusWidget(QWidget):
         self._build_ask_row()
         self._build_buttons()
         self.panel = TaskPanel(self)
+        self.plan_window = DayPlanWindow(self)
         if self._gh_cfg is not None:
             token = load_token()
             if token:
@@ -1705,6 +1740,7 @@ class FocusWidget(QWidget):
         self.save()
         self.update()
         self._refresh_toggle_labels()
+        self._refresh_plan_window()
 
     def _set_status(self, message: str):
         """A warning that stays, such as a list saved by a newer app (red, under the panel header)."""
@@ -1851,6 +1887,7 @@ class FocusWidget(QWidget):
         self._refresh_toggle_labels()
         if self.panel.isVisible():
             self.panel.refresh()
+        self._refresh_plan_window()
 
     def _refresh_toggle_labels(self):
         running = self.timer.running and not self.timer.paused
@@ -1870,6 +1907,7 @@ class FocusWidget(QWidget):
                 (f"+{self.s['add_minutes_step']}", "Add minutes (+)", self.add_minutes),
                 ("✓", "Done (D)", self.done),
                 ("☰", "All tasks (Enter)", self.open_panel),
+                ("📅", "Day plan (P)", self.toggle_day_plan),
                 ("–", "Shrink to a small circle (M). Click the circle to expand", lambda: self.set_mini(True)),
                 ("✕", "Hide widget (Esc). Ctrl+Alt+F or the tray icon brings it back", self.hide)]
         self.btn_toggle = None
@@ -2372,12 +2410,28 @@ class FocusWidget(QWidget):
         if fc.canonical(plan) != fc.canonical(old):
             self.day_plan = plan
             self.update()
-            panel = getattr(self, "panel", None)  # None while the widget is still being built
-            if panel is not None and panel.isVisible():
-                panel.refresh_plan()
+            self._refresh_plan_window()
+
+    def _refresh_plan_window(self):
+        """Redraw the Day plan window if it is open (task names and finished tasks change how it looks)."""
+        window = getattr(self, "plan_window", None)  # None while the widget is still being built
+        if window is not None and window.isVisible():
+            window.refresh_plan()
+
+    def toggle_day_plan(self):
+        """Open the Day plan window, or close it if it is open."""
+        if self.plan_window.isVisible():
+            self.plan_window.hide()
+        else:
+            self.open_day_plan()
+
+    def open_day_plan(self):
+        self.plan_window.show()
+        self.plan_window.raise_()
+        self.plan_window.activateWindow()
 
     def shown_plan(self) -> dict | None:
-        """The plan the panel shows, which is today's if there is one, else tomorrow's."""
+        """The plan the Day plan window shows, which is today's if there is one, else tomorrow's."""
         p, today = self.day_plan, self.today()
         if p and p.get("date") in (today.isoformat(), (today + timedelta(days=1)).isoformat()):
             return p
@@ -2459,6 +2513,8 @@ class FocusWidget(QWidget):
             self.done()
         elif t.lower() == "m":
             self.set_mini(not self.mini)
+        elif t.lower() == "p":
+            self.toggle_day_plan()
         elif k in (Qt.Key_Return, Qt.Key_Enter):
             self.open_panel()
         elif k == Qt.Key_Escape:
@@ -2587,11 +2643,12 @@ class FocusWidget(QWidget):
     # -- ticking
     def on_tick(self):
         self._sync_tick()
-        if self.today() != self._day:  # past midnight, so repeats wake up and the plan card moves on a day
+        if self.today() != self._day:  # past midnight, so repeats wake up and the day plan moves on a day
             self._day = self.today()
             self.update()
             if self.panel.isVisible():
                 self.panel.refresh()
+            self._refresh_plan_window()
         if not self.timer.running or self.timer.paused:
             self.update()
             return
@@ -2803,6 +2860,7 @@ class TrayController:
         self.act_toggle = QAction("Hide widget", menu, triggered=self.toggle)
         menu.addAction(self.act_toggle)
         menu.addAction(QAction("All tasks…", menu, triggered=widget.open_panel))
+        menu.addAction(QAction("Day plan...", menu, triggered=widget.open_day_plan))
         menu.addAction(QAction("Shrink / expand", menu, triggered=lambda: widget.set_mini(not widget.mini)))
         menu.addAction(QAction("Start / pause", menu, triggered=widget.toggle_run))
         menu.addAction(QAction("Folders...", menu, triggered=widget.open_folders))

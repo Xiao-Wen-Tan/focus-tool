@@ -25,6 +25,7 @@ def widget(tmp_path, monkeypatch):
     w.plan.tasks = [fc.Task("A", 10), fc.Task("B", 5), fc.Task("C", 5)]
     yield w
     w.panel.close()
+    w.plan_window.close()
     w.close()
 
 
@@ -171,3 +172,90 @@ def test_panel_start_button_starts_the_selected_task_while_another_is_paused(wid
     assert widget.panel.list.item(0).text() == "⏸ 10m · A   (2 min used)"
     widget.panel.list.setCurrentRow(1)
     assert widget.panel.btn_toggle.text() == "⏸ Pause"  # the selected task is the one on the timer
+
+
+# ---------- the Day plan window has its own button ----------
+
+def _key(w, key, text):
+    from PySide6.QtGui import QKeyEvent
+    w.keyPressEvent(QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier, text))
+
+
+def test_bottom_row_has_a_day_plan_button_next_to_the_panel_button(widget):
+    labels = [b.text() for b in widget.btn_row.findChildren(QPushButton)]
+    assert labels == ["▶", f"+{widget.s['add_minutes_step']}", "✓", "☰", "📅", "–", "✕"]
+    assert "Day plan" in _button(widget.btn_row, "📅").toolTip()
+
+
+def test_day_plan_button_opens_and_closes_the_day_plan_window(widget):
+    assert not widget.plan_window.isVisible()
+    _button(widget.btn_row, "📅").click()
+    assert widget.plan_window.isVisible()
+    assert widget.plan_window.windowTitle() == "Day plan"
+    assert not widget.panel.isVisible()  # only the plan window opens
+    _button(widget.btn_row, "📅").click()
+    assert not widget.plan_window.isVisible()
+
+
+def test_p_key_toggles_the_day_plan_window_and_d_is_still_done(widget):
+    _key(widget, Qt.Key_P, "p")
+    assert widget.plan_window.isVisible()
+    _key(widget, Qt.Key_P, "p")
+    assert not widget.plan_window.isVisible()
+    _key(widget, Qt.Key_D, "d")
+    assert [d.name for d in widget.completed] == ["A"]
+    assert not widget.plan_window.isVisible()
+
+
+def test_day_plan_window_shows_no_plan_yet_and_a_replan_button(widget):
+    widget.toggle_day_plan()
+    pw = widget.plan_window
+    assert pw.plan_heading.text().startswith("No plan yet")
+    assert pw.plan_list.count() == 0
+    assert pw.b_replan.text() == "Re-plan now"
+
+
+def test_task_panel_no_longer_has_the_plan_card(widget):
+    p = widget.panel
+    assert not hasattr(p, "plan_card") and not hasattr(p, "plan_list")
+    assert "Re-plan now" not in [b.text() for b in p.findChildren(QPushButton)]
+    from PySide6.QtWidgets import QLabel
+    assert not any("Day plan" in lab.text() for lab in p.findChildren(QLabel))
+
+
+def test_day_plan_window_size_and_position_are_kept_on_this_computer(widget, tmp_path):
+    import json
+    import focus_tool as ft
+    widget.toggle_day_plan()
+    widget.plan_window.resize(420, 333)
+    widget.plan_window.move(150, 120)
+    widget.save()
+    saved = json.loads(widget.local_path.read_text(encoding="utf-8"))["geometry"]
+    assert (saved["plan_w"], saved["plan_h"]) == (420, 333)
+    assert (saved["plan_x"], saved["plan_y"]) == (150, 120)
+    widget.plan_window.close()
+    again = ft.FocusWidget(ft.load_settings())
+    try:
+        assert (again.plan_window.width(), again.plan_window.height()) == (420, 333)
+        assert (again.plan_window.x(), again.plan_window.y()) == (150, 120)
+    finally:
+        again.panel.close()
+        again.plan_window.close()
+        again.close()
+
+
+def test_tray_menu_day_plan_item_opens_the_window(widget, monkeypatch):
+    from types import SimpleNamespace
+    import focus_tool as ft
+    fake_user32 = SimpleNamespace(RegisterHotKey=lambda *a: 1, UnregisterHotKey=lambda *a: 1)
+    monkeypatch.setattr(ft, "ctypes", SimpleNamespace(windll=SimpleNamespace(user32=fake_user32)))
+    tray = ft.TrayController(QApplication.instance(), widget, widget.s)
+    try:
+        act = next(a for a in tray.tray.contextMenu().actions() if a.text() == "Day plan...")
+        act.trigger()
+        assert widget.plan_window.isVisible()
+        act.trigger()
+        assert widget.plan_window.isVisible()  # the tray item always brings the window up
+    finally:
+        QApplication.instance().removeNativeEventFilter(tray.filter)
+        tray.tray.hide()

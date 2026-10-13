@@ -1,4 +1,4 @@
-"""The desktop's GitHub sync mode, the day-plan card, Up next from the plan, and working hours.
+"""The desktop's GitHub sync mode, the Day plan window, Up next from the plan, and working hours.
 
 Run without a screen (Qt offscreen mode) against tests/fake_github.py on localhost, never the real network.
 gh_store's token functions are replaced, so the real Windows Credential Manager is never touched. Each
@@ -72,6 +72,7 @@ def env(tmp_path, monkeypatch, fake):
     for w in made:
         w.stop_sync()
         w.panel.close()
+        w.plan_window.close()
         w.close()
 
 
@@ -306,13 +307,13 @@ def test_github_mode_reads_the_plan_from_github_and_mirrors_it(env, clock):
     assert json.loads((env.box / "day-plan.json").read_text(encoding="utf-8"))["date"] == "2026-10-12"
 
 
-def test_plan_card_shows_todays_or_tomorrows_plan(env, clock):
+def test_day_plan_window_shows_todays_or_tomorrows_plan(env, clock):
     a = env.computer("a", github=False)
     alpha = add(a, "Alpha", 30)
-    a.panel.show()
+    a.toggle_day_plan()
     _write_plan(env, _plan("2026-10-12", [_block(alpha, "09:00", "09:30", 30)]))
     a.check_shared()
-    p = a.panel
+    p = a.plan_window
     assert "Mon 10/12" in p.plan_heading.text() and "made 19:07" in p.plan_heading.text()
     assert _texts(p.plan_list) == ["09:00-09:30  Alpha  (30m)"]
     assert "needs 30 min more" in p.plan_warn.text() and p.plan_warn.isVisibleTo(p)
