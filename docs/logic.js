@@ -426,6 +426,22 @@ export function syncPauseUntil(result, nowMs) {
   return 0;
 }
 
+/** Whether automatic syncs stop after a sync result. GitHub rejecting the token ("auth") pauses them,
+ * like the desktop does; any other result (from a button press, the only kind that runs while paused) lifts it. */
+export function authPauseAfterSync(result) {
+  return Boolean(result && result.status === "auth");
+}
+
+/** Saving Settings lifts the pause only when the token was changed. */
+export function authPauseAfterSave(paused, oldToken, newToken) {
+  return Boolean(paused) && String(oldToken || "").trim() === String(newToken || "").trim();
+}
+
+/** May a sync run now? While paused for the token, only a button press (`force`) syncs. */
+export function mayAutoSync(authPaused, force) {
+  return Boolean(force) || !authPaused;
+}
+
 /** The editor fields the user actually changed: compares the form with the values when the sheet opened,
  * so a change made on another device meanwhile (say a rename) is not undone by Save. */
 export function changedFields(original, form) {

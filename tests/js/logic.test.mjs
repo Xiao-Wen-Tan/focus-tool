@@ -16,10 +16,10 @@ test("the page module links (all imports exist) and does nothing without a DOM",
 
 test("addTask puts the new task at the front; repeat clears dates; folder is registered", () => {
   const d = doc([task("a", "Alpha")]);
-  const t = L.addTask(d, { name: "  Write intro ", estimate_min: 25, folder: "Paper/Theory", deadline: "2026-10-16" });
+  const t = L.addTask(d, { name: "  Write intro ", estimate_min: 25, folder: "Puzzle/Tiles", deadline: "2026-10-16" });
   assert.deepEqual(names(d), ["Write intro", "Alpha"]);
   assert.equal(t.estimate_min, 25);
-  assert.deepEqual(d.folders, ["Paper/Theory", "Paper"]);
+  assert.deepEqual(d.folders, ["Puzzle/Tiles", "Puzzle"]);
   const r = L.addTask(d, { name: "Walk", repeat: { kind: "daily" }, deadline: "2026-10-16", target: "2026-10-15" });
   assert.equal(r.deadline, null);
   assert.equal(r.target, null);
@@ -242,4 +242,20 @@ test("editor Save sends only the fields the user changed", () => {
   L.updateTask(d, "a", L.changedFields(opened, { ...opened, estimate_min: 45 }));
   assert.equal(L.findTask(d, "a").name, "Alpha renamed on desktop");
   assert.equal(L.findTask(d, "a").estimate_min, 45);
+});
+
+test("after GitHub rejects the token, automatic syncs pause until the token is changed", () => {
+  // A sync result decides the pause: "auth" pauses, anything else (a button press that worked) lifts it.
+  assert.equal(L.authPauseAfterSync({ status: "auth" }), true);
+  assert.equal(L.authPauseAfterSync({ status: "ok" }), false);
+  assert.equal(L.authPauseAfterSync({ status: "offline" }), false);
+  // While paused, only a button press (force) syncs.
+  assert.equal(L.mayAutoSync(true, false), false);
+  assert.equal(L.mayAutoSync(true, true), true);
+  assert.equal(L.mayAutoSync(false, false), true);
+  // Saving Settings lifts the pause only when the token changed.
+  assert.equal(L.authPauseAfterSave(true, "tok-1", "tok-1"), true);
+  assert.equal(L.authPauseAfterSave(true, "tok-1", " tok-1 "), true);
+  assert.equal(L.authPauseAfterSave(true, "tok-1", "tok-2"), false);
+  assert.equal(L.authPauseAfterSave(false, "tok-1", "tok-1"), false);
 });

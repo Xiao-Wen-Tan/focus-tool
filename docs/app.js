@@ -10,7 +10,7 @@ import {
   dateLabel, rowLabel, repeatLabel, sleepText, mascot, upNext, addTask, updateTask, startTask, toggleRun,
   addMinutes, finishTaskNow, removeTask, putBack, clearDone, moveRanked, moveRankedToTop, setWindows,
   windowsText, timelineSegments, minToHm, stampToLocalHm, parseApiOverride, readLocalDoc, replanBlockMessage,
-  syncPauseUntil, changedFields,
+  syncPauseUntil, changedFields, authPauseAfterSync, authPauseAfterSave, mayAutoSync,
 } from "./logic.js";
 
 const APP_VERSION = "2.0.0";
@@ -65,6 +65,7 @@ const app = {
   syncAgain: false,
   syncTimer: null,
   pauseUntil: 0, // after "rate limited": no automatic sync before this time (ms)
+  authPaused: false, // GitHub rejected the token: no automatic sync until a new token is saved in Settings
   celebrateUntil: 0,
   asking: false, // "time is up" message showing
   planBusy: "",
@@ -146,6 +147,7 @@ function runSync({ force = false } = {}) {
   }
   if (!app.engine) return Promise.resolve({ status: "none", message: "Not connected to GitHub." });
   if (blockedText()) return Promise.resolve({ status: "version", message: blockedText() });
+  if (!mayAutoSync(app.authPaused, force)) return Promise.resolve({ status: "auth", message: app.sync.message });
   if (!force && Date.now() < app.pauseUntil) {
     // Keep exactly one automatic retry, at the time GitHub gave us.
     clearTimeout(app.syncTimer);
@@ -179,6 +181,7 @@ async function doSync() {
   }
   app.syncing = false;
   app.pauseUntil = syncPauseUntil(r, Date.now());
+  app.authPaused = authPauseAfterSync(r);
   if (r.status === "ok") {
     const before = canonical(app.doc);
     if (before === sent) {
@@ -295,7 +298,7 @@ function statusText() {
   const dirty = app.engine && app.engine.dirty;
   const st = app.sync.status;
   if (st === "offline") return { cls: "warn", text: "Offline. Your changes are kept on this phone." };
-  if (st === "auth") return { cls: "bad", text: app.sync.message };
+  if (st === "auth") return { cls: "bad", text: `${app.sync.message} Automatic syncing is paused until you save a new token in Settings.` };
   if (st === "rate_limited") return { cls: "warn", text: "GitHub asked us to wait. Will try again later." };
   if (st === "error") return { cls: "warn", text: app.sync.message };
   if (dirty) return { cls: "dim", text: "Changes waiting to be sent." };
@@ -913,6 +916,7 @@ function viewSettings() {
           save(KEY_PLAN, null);
         }
         app.blocked = null; // a newer list kept on this phone (app.localBlock) stays blocked
+        app.authPaused = authPauseAfterSave(app.authPaused, st.token, next.token);
         makeEngine();
         if (app.engine) app.engine.setDirty(true);
         result.textContent = connected() ? "Saved. Syncing now." : "Saved. Fill in owner, repository and token to sync.";
@@ -1015,7 +1019,7 @@ function start() {
   render();
   setInterval(tick, 1000);
   setInterval(() => {
-    if (!document.hidden && app.engine) {
+    if (!document.hidden && app.engine && !app.authPaused) {
       runSync();
       if (app.ui.tab === "plan" || app.ui.tab === "now") refreshDayPlan();
     }
@@ -1023,7 +1027,7 @@ function start() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       render();
-      if (app.engine) { runSync(); refreshDayPlan(); }
+      if (app.engine && !app.authPaused) { runSync(); refreshDayPlan(); }
     }
   });
   window.addEventListener("online", () => { if (app.engine) runSync(); });
