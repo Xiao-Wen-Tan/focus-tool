@@ -578,3 +578,43 @@ def test_saving_the_window_position_never_raises(env, monkeypatch):
 
     monkeypatch.setattr(Path, "replace", locked)
     a._save_local()  # the position is saved next time; the app must not stop
+
+
+# ---------- fix round 2 ----------
+
+def test_reconnecting_during_a_stuck_sync_keeps_the_new_files(env):
+    a = env.computer("a")
+    add(a, "Alpha")
+    a.sync_now()
+    folder = env.tmp / "a" / "FocusTool"
+    gate, entered = _make_slow(a)
+    try:
+        a.AUTO_SYNC = True
+        a.kick_sync()
+        assert entered.wait(5)
+        worker = a._worker
+        a.AUTO_SYNC = False
+        a.disconnect_github()
+        env.tokens["t"] = "test-token"
+        a.connect_github({"owner": "me", "repo": "focus-data", "branch": "main"}, "test-token")
+        add(a, "Beta")
+    finally:
+        gate.set()
+    worker.join(10)  # the old session's sync ends, then its clean-up job runs
+    assert (folder / "github-pending.json").exists() and (folder / "github-cache.json").exists()
+    pending = json.loads((folder / "github-pending.json").read_text(encoding="utf-8"))
+    assert "Beta" in [t["name"] for t in pending["plan"]["tasks"]]
+    assert a.sync_now().status == "ok"
+    assert "Beta" in remote_names(env.fake)
+
+
+def test_a_newer_box_file_saved_during_github_mode_is_not_overwritten(env):
+    a = env.computer("a")
+    add(a, "Alpha")
+    a.sync_now()
+    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    (env.box / "state.json").write_text(text, encoding="utf-8")
+    add(a, "Beta")
+    assert a.sync_now().status == "ok"
+    assert (env.box / "state.json").read_text(encoding="utf-8") == text
+    assert "Beta" in remote_names(env.fake)

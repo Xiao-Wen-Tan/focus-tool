@@ -282,6 +282,10 @@ def run_job(job: dict) -> dict:
     kind, engine, cancel = job["kind"], job.get("engine"), job.get("cancel")
     out = {"kind": kind, "engine": engine}
     if kind == "forget":
+        latest = job.get("latest")
+        if latest is not None and latest[0] != job.get("session"):
+            out["skipped"] = True  # a newer GitHub session uses these file names now; leave its files alone
+            return out
         for path in job["paths"]:
             try:
                 Path(path).unlink()
@@ -1596,6 +1600,7 @@ class FocusWidget(QWidget):
         self._results: queue.Queue = queue.Queue()  # its answers, applied by on_tick on the Qt thread
         self._job_lock = threading.Lock()  # one GitHub job at a time (they share the cache file)
         self._cancel = threading.Event()  # set when GitHub mode ends; its queued jobs then do nothing
+        self._session = [0]  # number of the current GitHub session, shared with the worker (see run_job)
         self.pending_path = self.local_path.parent / "github-pending.json"  # edits not yet pushed
         self._worker: threading.Thread | None = None
         self._job_pending = False  # a sync job is queued or running
@@ -2071,7 +2076,7 @@ class FocusWidget(QWidget):
     def _write_mirror(self, doc: dict):
         """GitHub mode keeps data\\state.json in Box as a backup copy. It is written, never read, and never
         written over a file saved by a newer app."""
-        if self._box_blocked:
+        if self._box_blocked or self._box_file_is_newer():
             return
         st = fc.doc_to_state(doc)
         text = json.dumps(fc.state_to_doc(st), indent=2, ensure_ascii=False)
@@ -2082,6 +2087,20 @@ class FocusWidget(QWidget):
         except OSError:
             return  # Box is holding the file; the next change writes it
         self._mirror_text = text
+
+    def _box_file_is_newer(self) -> bool:
+        """True if the Box state.json was saved by a newer app (checked before each mirror write, since
+        such a file can appear at any time). Only its version number is looked at."""
+        try:
+            with self.state_path.open("r", encoding="utf-8") as f:
+                head = f.read()  # small file; the key may come anywhere if another app wrote it
+        except OSError:
+            return False
+        m = re.search(r'"version"\s*:\s*(\d+)', head)
+        if m and int(m.group(1)) > fc.STATE_VERSION:
+            self._box_blocked = True  # stays until restart, as for a newer file found in Box mode
+            return True
+        return False
 
     def _saved_github_docs(self, engine) -> list:
         """The lists this computer kept for GitHub mode (pending edits, and the sync cache's copies)."""
@@ -2107,6 +2126,7 @@ class FocusWidget(QWidget):
         if self._shared_dirty:
             self._save_shared()  # finish the last write in the mode we are leaving
         self._end_session(delete_files=False)
+        self._session[0] += 1  # clean-up jobs of earlier sessions no longer touch the files
         self._engine, self.mode = engine, "github"
         self._jobs, self._results, self._cancel = queue.Queue(), queue.Queue(), threading.Event()
         self._job_pending, self._sync_due, self._last_sync_at = False, None, float("-inf")
@@ -2178,10 +2198,14 @@ class FocusWidget(QWidget):
                 break
         paths = [self.pending_path] + ([self._engine.cache_path] if self._engine is not None else [])
         if delete_files:
+            forget = {"kind": "forget", "paths": paths, "session": self._session[0], "latest": self._session}
             if self._worker is not None:
-                self._jobs.put({"kind": "forget", "paths": paths})
-            run_job({"kind": "forget", "paths": paths})  # now too, in case no job is running
+                self._jobs.put(forget)
+            run_job(forget)  # now too, in case no job is running
         self.stop_sync()
+        # Detach: the old worker keeps its own queue (with the jobs just queued for it), so ending a
+        # session a second time can never take them away again.
+        self._jobs, self._results = queue.Queue(), queue.Queue()
         self._job_pending = False
 
     def stop_sync(self):
