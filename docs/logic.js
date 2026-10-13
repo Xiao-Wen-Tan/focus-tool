@@ -3,7 +3,7 @@
 // The rules mirror the desktop panel in focus_tool.py: start, pause, Done, +5, Put back, reorder.
 import {
   EPOCH, WEEKDAY_KEYS, newId, clone, zonedParts, displaySections, reorderRanked, isActive, isDated,
-  nextActiveDay, expiredRepeats, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
+  nextActiveDay, nextDueDay, expiredRepeats, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
   timerResume, timerAddMinutes, timerSkip, roundHalfEven, addFolder, weekday, taskDate, deepEqual,
   emptyDoc, normalizeDoc, VersionError, STATE_VERSION, parseHm,
 } from "./core.js";
@@ -78,15 +78,23 @@ export function dueText(t) {
   return due;
 }
 
-/** The full row text: timer mark, repeat mark, date prefix, then taskLabel. A repeating task's deadline is
- * the last day it repeats, so it keeps the plain 📅 day. */
-export function rowLabel(doc, t) {
+/** The words for a repeating task: "📅 Due Wed 10/14 · 🔁 until Fri 10/30" (the next day it comes up, then the
+ * last day it repeats), "📅 Due Wed 10/14 · 🔁" without a last day, or just "🔁" when no day is left.
+ * Like repeat_text in focus_tool.py. */
+export function repeatDueText(t, today) {
+  const due = nextDueDay(t, today);
+  const until = t.deadline ? `🔁 until ${dateLabel(t.deadline)}` : "🔁";
+  return due ? `📅 Due ${dateLabel(due)} · ${until}` : until;
+}
+
+/** The full row text: timer mark, date prefix, then taskLabel. A repeating task shows the next day it comes
+ * up as its due date, and its own deadline as the last day it repeats. */
+export function rowLabel(doc, t, today = localNow(doc).day) {
   let pre = "";
   const tm = doc.timer;
   if (tm && tm.running && tm.task_id === t.id) pre += tm.paused ? "⏸ " : "▶ ";
   else if (t.spent_s) pre += "⏸ ";
-  if (t.repeat) pre += "🔁 ";
-  if (t.repeat && isDated(t)) pre += `📅 ${dateLabel(taskDate(t))} · `;
+  if (t.repeat) pre += `${repeatDueText(t, today)} · `;
   else if (isDated(t)) pre += `${dueText(t)} · `;
   return pre + taskLabel(t);
 }
@@ -140,9 +148,10 @@ export function mascot(doc, nowNaive, celebrating) {
 
 // ---------------------------------------------------------------- what to do next
 
-/** Tasks in the order the List tab shows them: "By date" first, then "Your order". */
-export function displayOrder(doc) {
-  const [dated, ranked] = displaySections(doc.plan.tasks);
+/** Tasks in the order the List tab's By date view shows them: dated tasks (repeats by the next day they come
+ * up) first, then the rest in your order. */
+export function displayOrder(doc, today) {
+  const [dated, ranked] = displaySections(doc.plan.tasks, today);
   return [...dated, ...ranked];
 }
 
@@ -151,7 +160,7 @@ export function upNext(doc, dayPlan, now) {
   const live = new Set(doc.plan.tasks.filter((t) => isActive(t, now.day)).map((t) => t.id));
   const b = nextBlock(dayPlan, now.naive, live);
   if (b) return { task: findTask(doc, b.task_id), block: b };
-  const t = displayOrder(doc).find((x) => isActive(x, now.day));
+  const t = displayOrder(doc, now.day).find((x) => isActive(x, now.day));
   return { task: t || null, block: null };
 }
 
@@ -322,6 +331,27 @@ export function moveRankedToTop(doc, id) {
   const ids = rankedIds(doc);
   if (!ids.includes(id) || ids[0] === id) return false;
   doc.plan.tasks = reorderRanked(doc.plan.tasks, [id, ...ids.filter((i) => i !== id)]);
+  return true;
+}
+
+/** My order: move any task, dated or not, one place up (-1) or down (+1) among `visibleIds` (the tasks the
+ * current folder filter shows). It swaps places with its visible neighbour; hidden tasks keep their places. */
+export function moveTask(doc, id, delta, visibleIds = null) {
+  const tasks = doc.plan.tasks;
+  const ids = tasks.map((t) => t.id);
+  const shown = (visibleIds || ids).filter((i) => ids.includes(i));
+  const k = shown.indexOf(id);
+  const j = k + delta;
+  if (k < 0 || j < 0 || j >= shown.length) return false;
+  const a = ids.indexOf(id), b = ids.indexOf(shown[j]);
+  [tasks[a], tasks[b]] = [tasks[b], tasks[a]];
+  return true;
+}
+
+export function moveTaskToTop(doc, id) {
+  const k = doc.plan.tasks.findIndex((t) => t.id === id);
+  if (k <= 0) return false;
+  doc.plan.tasks.unshift(...doc.plan.tasks.splice(k, 1));
   return true;
 }
 

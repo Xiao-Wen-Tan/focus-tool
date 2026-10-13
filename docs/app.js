@@ -1,14 +1,14 @@
 // The phone web app: five tabs (Now, List, Done, Plan, Settings) over the same list the desktop uses.
 // Page code only; the rules live in core.js (shared with the desktop) and logic.js (button actions).
 import {
-  canonical, clone, mergeDocs, stampChanges, nowIso, displaySections, inFolder,
+  canonical, clone, mergeDocs, stampChanges, nowIso, displaySections, nextDueDay, inFolder,
   folderTree, isActive, renameFolder, deleteFolder, addFolder, timerView, WEEKDAY_KEYS, addDays,
 } from "./core.js";
 import { GitHubStore, SyncEngine, fetchDayPlan } from "./store.js";
 import {
   TIME_PRESETS, DEFAULT_MINUTES, ADD_MINUTES_STEP, CELEBRATE_MS, localNow, findTask, timerTask, mmss, mins,
   dateLabel, rowLabel, repeatLabel, sleepText, mascot, upNext, addTask, updateTask, startTask, toggleRun,
-  addMinutes, finishTaskNow, removeTask, removeExpiredRepeats, putBack, clearDone, moveRanked, moveRankedToTop, setWindows,
+  addMinutes, finishTaskNow, removeTask, removeExpiredRepeats, putBack, clearDone, moveRanked, moveRankedToTop, moveTask, moveTaskToTop, setWindows,
   windowsText, timelineSegments, minToHm, stampToLocalHm, parseApiOverride, readLocalDoc, replanBlockMessage,
   syncPauseUntil, changedFields, authPauseAfterSync, authPauseAfterSave, mayAutoSync, blockDateText,
   folderNotesText, setFolderNotes, progressFor, addProgress, editProgress, deleteProgress,
@@ -532,7 +532,7 @@ function folderOptions(selected, { all = true, none = false, extra = [] } = {}) 
   return opts;
 }
 
-function taskRow(t, { ranked, visibleIds, today }) {
+function taskRow(t, { ranked, anyOrder = false, visibleIds, today }) {
   const asleep = Boolean(t.repeat && !isActive(t, today));
   const sub = [];
   if (asleep) sub.push(sleepText(t, today));
@@ -540,14 +540,16 @@ function taskRow(t, { ranked, visibleIds, today }) {
   if (t.folder && app.ui.folder == null) sub.push(t.folder);
   if (t.details.trim()) sub.push(t.details.trim().split("\n")[0]);
   const main = h("button", { type: "button", class: "row-main", onclick: () => openEditor(t.id) },
-    h("span", { class: "row-label" }, rowLabel(app.doc, t)),
+    h("span", { class: "row-label" }, rowLabel(app.doc, t, today)),
     sub.length ? h("span", { class: "row-sub" }, sub.join("  ·  ")) : null);
+  // My order moves every task; By date moves only the undated ones (the dates order the rest).
+  const move = anyOrder ? moveTask : moveRanked, toTop = anyOrder ? moveTaskToTop : moveRankedToTop;
   const tools = ranked ? h("div", { class: "row-tools" },
-    btn("↑", () => commit((d) => moveRanked(d, t.id, -1, visibleIds)), "icon", { "aria-label": `Move ${t.name} up` }),
-    btn("↓", () => commit((d) => moveRanked(d, t.id, 1, visibleIds)), "icon", { "aria-label": `Move ${t.name} down` }),
-    btn("⤒", () => commit((d) => moveRankedToTop(d, t.id)), "icon", { "aria-label": `Move ${t.name} to the top` }),
+    btn("↑", () => commit((d) => move(d, t.id, -1, visibleIds)), "icon", { "aria-label": `Move ${t.name} up` }),
+    btn("↓", () => commit((d) => move(d, t.id, 1, visibleIds)), "icon", { "aria-label": `Move ${t.name} down` }),
+    btn("⤒", () => commit((d) => toTop(d, t.id)), "icon", { "aria-label": `Move ${t.name} to the top` }),
   ) : null;
-  const due = t.deadline && !t.repeat ? " due" : "";
+  const due = (t.deadline && !t.repeat) || (t.repeat && nextDueDay(t, today)) ? " due" : "";
   return h("li", { class: `row${asleep ? " asleep" : ""}${due}${app.doc.timer.running && app.doc.timer.task_id === t.id ? " on-timer" : ""}` }, main, tools);
 }
 
@@ -555,23 +557,38 @@ function viewList() {
   const doc = app.doc;
   const today = now().day;
   const filter = app.ui.folder && folderTree(doc.folders, doc.plan.tasks).some(([p]) => p === app.ui.folder) ? app.ui.folder : null;
-  const [dated, ranked] = displaySections(doc.plan.tasks);
-  const shownDated = dated.filter((t) => inFolder(t, filter));
-  const shownRanked = ranked.filter((t) => inFolder(t, filter));
-  const visibleIds = shownRanked.map((t) => t.id);
+  const byDate = app.ui.sort === "date";
   const select = h("select", { class: "folder-filter", "aria-label": "Show folder", onchange: (e) => {
     app.ui.folder = e.target.value || null;
     save(KEY_UI, app.ui);
     render();
   } }, ...folderOptions(filter));
   const head = h("div", { class: "list-head" }, select, btn("+ Add", () => openEditor(null), "primary"));
-  const out = h("div", { class: "list" }, head);
+  const sortTabs = h("div", { class: "pills sort-tabs", role: "group", "aria-label": "Sort" },
+    [["order", "My order"], ["date", "By date"]].map(([value, label]) => {
+      const on = (value === "date") === byDate;
+      return btn(label, () => { app.ui.sort = value; save(KEY_UI, app.ui); render(); }, `pill${on ? " on" : ""}`,
+        { "aria-pressed": on ? "true" : "false" });
+    }));
+  const out = h("div", { class: "list" }, head, sortTabs);
   if (filter) out.append(notesCard(filter));
+  const hint = h("p", { class: "hint" }, "Tap a task to edit, start or finish it. New tasks go to the top.");
+  if (!byDate) {
+    const shown = doc.plan.tasks.filter((t) => inFolder(t, filter));
+    const visibleIds = shown.map((t) => t.id);
+    out.append(card("My order", shown.length
+      ? h("ul", { class: "rows" }, shown.map((t) => taskRow(t, { ranked: true, anyOrder: true, visibleIds, today })))
+      : h("p", { class: "empty" }, filter ? "No tasks in this folder." : "No tasks yet. Tap + Add."), hint));
+    return out;
+  }
+  const [dated, ranked] = displaySections(doc.plan.tasks, today);
+  const shownDated = dated.filter((t) => inFolder(t, filter));
+  const shownRanked = ranked.filter((t) => inFolder(t, filter));
+  const visibleIds = shownRanked.map((t) => t.id);
   if (shownDated.length) {
     out.append(card("📅 By date", h("ul", { class: "rows" }, shownDated.map((t) => taskRow(t, { ranked: false, today })))));
   }
-  const hint = h("p", { class: "hint" }, "Tap a task to edit, start or finish it. New tasks go to the top.");
-  out.append(card("Your order", shownRanked.length
+  out.append(card("No date, in your order", shownRanked.length
     ? h("ul", { class: "rows" }, shownRanked.map((t) => taskRow(t, { ranked: true, visibleIds, today })))
     : h("p", { class: "empty" }, filter ? "No tasks in this folder." : "No tasks yet. Tap + Add."), hint));
   return out;

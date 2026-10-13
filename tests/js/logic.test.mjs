@@ -112,6 +112,24 @@ test("moving in Your order skips dated tasks and respects the folder filter", ()
   assert.deepEqual(names(d), ["Alpha", "Beta", "Gamma", "Epsilon"]);
 });
 
+test("in My order every task moves, dated or not, among the tasks shown", () => {
+  const d = doc([
+    task("a", "Alpha", { folder: "P" }), task("b", "Beta", { deadline: "2026-10-16" }),
+    task("c", "Gamma"), task("e", "Epsilon", { folder: "P" }),
+  ]);
+  assert.ok(L.moveTask(d, "c", -1));
+  assert.deepEqual(names(d), ["Alpha", "Gamma", "Beta", "Epsilon"]);
+  assert.ok(L.moveTask(d, "b", -1));  // a dated task moves too
+  assert.deepEqual(names(d), ["Alpha", "Beta", "Gamma", "Epsilon"]);
+  // With folder P shown, Epsilon's visible neighbour above is Alpha; the hidden tasks keep their places.
+  assert.ok(L.moveTask(d, "e", -1, ["a", "e"]));
+  assert.deepEqual(names(d), ["Epsilon", "Beta", "Gamma", "Alpha"]);
+  assert.equal(L.moveTask(d, "e", -1), false);
+  assert.ok(L.moveTaskToTop(d, "b"));
+  assert.deepEqual(names(d), ["Beta", "Epsilon", "Gamma", "Alpha"]);
+  assert.equal(L.moveTaskToTop(d, "b"), false);
+});
+
 test("removing the task on the timer stops the timer", () => {
   const d = doc([task("a", "Alpha")]);
   L.startTask(d, "a", at("2026-10-13T09:00:00.000000"));
@@ -151,9 +169,12 @@ test("labels: minutes, mm:ss, dates", () => {
   assert.equal(L.rowLabel(doc([]), { name: "Alpha", estimate_min: 45, spent_s: 0, deadline: null, target: "2026-10-16", repeat: null }), "🎯 Aim Fri 10/16 · 45m · Alpha");
   assert.equal(L.rowLabel(doc([]), { name: "Grant", estimate_min: 30, spent_s: 0, deadline: "2026-10-16", deadline_time: "17:00", target: null, repeat: null }), "📅 Due Fri 10/16 5:00pm · 30m · Grant");
   assert.equal(L.rowLabel(doc([]), { name: "Both", estimate_min: 10, spent_s: 0, deadline: "2026-10-16", target: "2026-10-14", repeat: null }), "📅 Due Fri 10/16, 🎯 aim Wed 10/14 · 10m · Both");
-  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 30, deadline: null, target: null, repeat: { kind: "daily" } }), "⏸ 🔁 10m · Walk   (under 1 min used)");
+  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 30, deadline: null, target: null, repeat: { kind: "daily" } }, "2026-10-13"), "⏸ 📅 Due Tue 10/13 · 🔁 · 10m · Walk   (under 1 min used)");
   assert.equal(L.repeatLabel({ kind: "days", days: ["mon", "thu"] }), "Mon, Thu");
-  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 0, deadline: "2026-10-16", target: null, repeat: { kind: "daily" } }), "🔁 📅 Fri 10/16 · 10m · Walk");
+  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 0, deadline: "2026-10-16", target: null, repeat: { kind: "daily" } }, "2026-10-13"), "📅 Due Tue 10/13 · 🔁 until Fri 10/16 · 10m · Walk");
+  // Done for today: the next day it comes up is its due date. No day left: only the repeat mark.
+  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 0, deadline: null, target: null, repeat: { kind: "daily" }, last_done: "2026-10-13" }, "2026-10-13"), "📅 Due Wed 10/14 · 🔁 · 10m · Walk");
+  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 0, deadline: "2026-10-13", target: null, repeat: { kind: "daily" }, last_done: "2026-10-13" }, "2026-10-13"), "🔁 until Tue 10/13 · 10m · Walk");
 });
 
 test("removeExpiredRepeats drops repeats past their deadline, and the save records them as deleted", () => {

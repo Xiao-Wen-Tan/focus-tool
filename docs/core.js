@@ -474,17 +474,34 @@ export function taskDate(t) {
 }
 
 /** [dated, ranked]. Dated: earliest date first, a deadline before a target-only task on the same
- * date, an earlier deadline time first (no time counts as day end), then list order. A repeating task with a deadline is dated like any other. Ranked: every other
- * task (repeats without a deadline too) in list order. */
-export function displaySections(tasks) {
-  const dated = tasks.map((t, i) => [t, i]).filter(([t]) => isDated(t))
-    .map(([t, i]) => {
+ * date, an earlier deadline time first (no time counts as day end), then list order. Without `today`, a
+ * repeating task with a deadline is dated by it and one without is ranked. With `today` ("YYYY-MM-DD"), every
+ * repeating task is dated by the next day it comes up (nextDueDay), counted as a deadline at the end of that
+ * day. Ranked: every other task in list order. Like display_sections in focus_core.py. */
+export function displaySections(tasks, today = null) {
+  const dated = [], ranked = [];
+  tasks.forEach((t, i) => {
+    const due = today ? nextDueDay(t, today) : null;
+    if (due) dated.push([[due, 0, 1440, i], t]);
+    else if (isDated(t)) {
       const first = taskDate(t);
       const hm = first === t.deadline ? parseHm(t.deadline_time) : null;
-      return [[first, t.deadline ? 0 : 1, hm == null ? 1440 : hm, i], t];
-    })
-    .sort((x, y) => cmpTuple(x[0], y[0])).map((x) => x[1]);
-  return [dated, tasks.filter((t) => !isDated(t))];
+      dated.push([[first, t.deadline ? 0 : 1, hm == null ? 1440 : hm, i], t]);
+    } else ranked.push(t);
+  });
+  return [dated.sort((x, y) => cmpTuple(x[0], y[0])).map((x) => x[1]), ranked];
+}
+
+/** The next day a repeating task comes up ("YYYY-MM-DD"): today when it is due today, else its next day.
+ * null for a task that does not repeat, a repeat with no day left before its deadline, or an unreadable rule.
+ * Like next_due_day in focus_core.py. */
+export function nextDueDay(task, today) {
+  if (!task.repeat) return null;
+  try {
+    return isActive(task, today) ? today : nextActiveDay(task, today);
+  } catch {
+    return null;
+  }
 }
 
 /** A new list where the ranked tasks follow `rankedIds`, in the slots ranked tasks used; dated tasks

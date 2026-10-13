@@ -198,6 +198,8 @@ body.sheet-open { overflow: hidden; }
 /* ---- List and rows */
 .list-head { display: flex; gap: 10px; margin-bottom: 12px; }
 .folder-filter { flex: 1; }
+.sort-tabs { margin-bottom: 12px; }
+.sort-tabs .pill { flex: 1; }
 
 select, .input {
   width: 100%;

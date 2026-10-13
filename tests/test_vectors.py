@@ -56,7 +56,8 @@ def test_stamp_vector(path):
 @pytest.mark.parametrize("case", _cases("sections.json"))
 def test_sections_vector(case):
     tasks = [fc.task_from_dict(t) for t in case["tasks"]]
-    dated, ranked = fc.display_sections(tasks)
+    today = date.fromisoformat(case["today"]) if case.get("today") else None
+    dated, ranked = fc.display_sections(tasks, today)
     assert [t.id for t in dated] == case["expected"]["dated"]
     assert [t.id for t in ranked] == case["expected"]["ranked"]
 

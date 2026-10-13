@@ -701,18 +701,35 @@ def _is_dated(t: Task) -> bool:
     return bool(t.deadline or t.target)
 
 
-def display_sections(tasks: List[Task]) -> tuple:
+def next_due_day(task: Task, today: date) -> Optional[date]:
+    """The next day a repeating task comes up: today when it is due today, else its next day. None for a task
+    that does not repeat, a repeat with no day left before its deadline, or a rule that cannot be read."""
+    if not task.repeat:
+        return None
+    try:
+        return today if is_active(task, today) else next_active_day(task, today)
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def display_sections(tasks: List[Task], today: Optional[date] = None) -> tuple:
     """(dated, ranked). Dated: tasks with a deadline or target, earliest date first, a deadline before a
     target-only task on the same date, an earlier deadline time first (no time counts as day end), then
-    list order. A repeating task with a deadline is dated like any
-    other. Ranked: all other tasks (repeats without a deadline too) in list order."""
-    dated = []
+    list order. Without `today`, a repeating task with a deadline is dated by that deadline and one without
+    is ranked. With `today`, every repeating task is dated by the next day it comes up (next_due_day), which
+    counts as a deadline at the end of that day. Ranked: all other tasks in list order."""
+    dated, ranked = [], []
     for i, t in enumerate(tasks):
-        if _is_dated(t):
+        due = next_due_day(t, today) if today is not None else None
+        if due is not None:
+            dated.append((due.isoformat(), False, 1440, i, t))
+        elif _is_dated(t):
             first = min(x for x in (t.deadline, t.target) if x)
             hm = parse_hm(t.deadline_time) if first == t.deadline else None
             dated.append((first, t.deadline is None, 1440 if hm is None else hm, i, t))
-    return [x[4] for x in sorted(dated, key=lambda x: x[:4])], [t for t in tasks if not _is_dated(t)]
+        else:
+            ranked.append(t)
+    return [x[4] for x in sorted(dated, key=lambda x: x[:4])], ranked
 
 
 def reorder_ranked(tasks: List[Task], ranked_ids: list) -> List[Task]:

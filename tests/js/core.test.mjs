@@ -43,7 +43,7 @@ const cases = (name, key = "cases") => load(join(VEC, name))[key];
 
 for (const c of cases("sections.json")) {
   test(`sections: ${c.description}`, () => {
-    const [dated, ranked] = core.displaySections(c.tasks);
+    const [dated, ranked] = core.displaySections(c.tasks, c.today || null);
     assert.deepEqual(dated.map((t) => t.id), c.expected.dated);
     assert.deepEqual(ranked.map((t) => t.id), c.expected.ranked);
   });

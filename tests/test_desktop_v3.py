@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
-from PySide6.QtCore import QDate, QEvent, Qt
+from PySide6.QtCore import QDate, QEvent, QPoint, Qt
 from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -232,7 +232,7 @@ def test_repeat_editor_sets_every_n_days_from_today_and_disables_dates(make, clo
     assert walk.repeat == {"kind": "every", "every": 3, "anchor": "2026-10-12"}
     assert walk.deadline == "2026-10-20" and p.ed_deadline.isEnabled()  # repeats until its deadline
     assert walk.target is None and not p.ed_target.isEnabled()
-    assert _texts(p.list) == ["🔁 until Tue 10/20 · 10m · Walk"]
+    assert _texts(p.list) == ["📅 Due Mon 10/12 · 🔁 until Tue 10/20 · 10m · Walk"]  # due today, the anchor
 
 
 def test_a_repeat_with_a_deadline_leaves_the_list_the_day_after(make, shared, clock):
@@ -442,10 +442,10 @@ def test_the_wheel_does_not_change_a_box_you_have_not_clicked(make):
     assert w.plan.tasks[0].folder is None
 
 
-def test_full_screen_button_and_keys(make):
+def test_full_screen_keys(make):
     w = make()
     p = _with_tasks(w, fc.Task("Alpha", 10))
-    p.btn_full.click()
+    p.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_F11, Qt.NoModifier))
     assert p.isFullScreen() and w.ui["panel_full"] is True
     p.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
     assert not p.isFullScreen() and w.ui["panel_full"] is False
@@ -487,12 +487,13 @@ def test_list_labels_tell_a_hard_deadline_from_an_aim_date(make, clock):
                     fc.Task("Walk", 5, repeat={"kind": "daily"}, deadline="2026-10-30"))
     rows = {p.list.item(i).text(): p.list.item(i) for i in range(p.list.count())}
     assert set(rows) == {"📅 Due Fri 10/16 5:00pm · 30m · Grant", "🎯 Aim Mon 10/19 · 20m · Paper",
-                         "📅 Due Fri 10/16, 🎯 aim Wed 10/14 · 10m · Both", "🔁 until Fri 10/30 · 5m · Walk"}
+                         "📅 Due Fri 10/16, 🎯 aim Wed 10/14 · 10m · Both",
+                         "📅 Due Mon 10/12 · 🔁 until Fri 10/30 · 5m · Walk"}
     red = QColor(ft.DUE_RED)
     assert rows["📅 Due Fri 10/16 5:00pm · 30m · Grant"].foreground().color() == red
     assert rows["📅 Due Fri 10/16, 🎯 aim Wed 10/14 · 10m · Both"].foreground().color() == red
     assert rows["🎯 Aim Mon 10/19 · 20m · Paper"].foreground().color() != red
-    assert rows["🔁 until Fri 10/30 · 5m · Walk"].foreground().color() != red
+    assert rows["📅 Due Mon 10/12 · 🔁 until Fri 10/30 · 5m · Walk"].foreground().color() == red  # due today
     assert "Deadline Fri 10/16 at 5:00pm" in rows["📅 Due Fri 10/16 5:00pm · 30m · Grant"].toolTip()
 
 
@@ -561,12 +562,18 @@ def test_day_plan_blocks_show_due_and_aim(make, clock):
 
 # ---------- the All tasks window minimizes ----------
 
-def test_minimize_button_and_restore(make):
+def test_no_own_full_screen_or_minimize_buttons(make):
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10))
+    assert not any(b.text() in ("⛶", "–") for b in p.findChildren(QPushButton))  # Windows' own buttons do it
+
+
+def test_minimize_and_restore(make):
     w = make()
     p = _with_tasks(w, fc.Task("Alpha", 10))
     flags = p.windowFlags()
     assert flags & Qt.WindowType_Mask == Qt.Window  # a normal window, so it has a taskbar button
-    p.btn_min.click()
+    p.minimize()
     assert p.isMinimized()
     w.open_panel()  # Enter or the list button on the widget
     assert not p.isMinimized() and p.isVisible()
@@ -575,8 +582,8 @@ def test_minimize_button_and_restore(make):
 def test_minimized_from_full_screen_comes_back_full_screen(make):
     w = make()
     p = _with_tasks(w, fc.Task("Alpha", 10))
-    p.btn_full.click()
-    p.btn_min.click()
+    p.toggle_full_screen()
+    p.minimize()
     assert p.isMinimized()
     w.open_panel()
     assert not p.isMinimized() and p.isFullScreen()
@@ -662,3 +669,95 @@ def test_renaming_a_folder_moves_its_notes(make):
     _show_folder(p, "NSF grant")
     assert p.notes_text.toPlainText() == "Waiting on letters"
     assert p.notes_log.count() == 1
+
+
+# ---------- ranking: drag sign, row arrows, open on release ----------
+
+def _row_point(p, row, part):
+    """A point on a task row: the 'up' or 'down' arrow, the drag 'sign', or the 'text'."""
+    r = p.list.visualItemRect(p.list.item(row))
+    if part in ("up", "down"):
+        return p.list.arrow_rect(r, -1 if part == "up" else 1).center()
+    return QPoint(r.left() + 10, r.center().y()) if part == "sign" else r.center()
+
+
+def test_row_arrows_move_without_opening(make):
+    from PySide6.QtTest import QTest
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10), fc.Task("Beta", 5, deadline="2026-10-16"), fc.Task("Gamma", 5))
+    p.sort_combo.setCurrentIndex(0)
+    assert p.list.reorderable
+    QTest.mouseClick(p.list.viewport(), Qt.LeftButton, Qt.NoModifier, _row_point(p, 2, "up"))
+    assert [t.name for t in w.plan.tasks] == ["Alpha", "Gamma", "Beta"]
+    QTest.mouseClick(p.list.viewport(), Qt.LeftButton, Qt.NoModifier, _row_point(p, 0, "down"))
+    assert [t.name for t in w.plan.tasks] == ["Gamma", "Alpha", "Beta"]
+    assert p.selected_ids() == [] and p._editor_item is None  # nothing opened
+
+
+def test_task_opens_on_release_not_on_press(make):
+    from PySide6.QtTest import QTest
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10), fc.Task("Beta", 5))
+    at = _row_point(p, 1, "text")
+    QTest.mousePress(p.list.viewport(), Qt.LeftButton, Qt.NoModifier, at)
+    assert p._editor_item is None  # still folded while the button is down, so a drag can start
+    QTest.mouseRelease(p.list.viewport(), Qt.LeftButton, Qt.NoModifier, at)
+    assert p.selected_task().name == "Beta" and p._editor_item is not None
+
+
+def test_by_date_has_no_row_arrows(make):
+    from PySide6.QtTest import QTest
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10), fc.Task("Beta", 5))
+    p.sort_combo.setCurrentIndex(1)
+    assert not p.list.reorderable
+    QTest.mouseClick(p.list.viewport(), Qt.LeftButton, Qt.NoModifier, _row_point(p, 1, "up"))
+    assert [t.name for t in w.plan.tasks] == ["Alpha", "Beta"]
+
+
+def test_editing_dates_or_folder_keeps_the_list_where_it_was(make, clock):
+    w = make()
+    p = _with_tasks(w, *[fc.Task(f"Task {i}", 10) for i in range(30)])
+    p.resize(560, 600)
+    QApplication.processEvents()
+    p.list.setCurrentRow(20)
+    p.list.scrollToItem(p.list.item(20))
+    QApplication.processEvents()
+    bar = p.list.verticalScrollBar()
+    at = bar.value()
+    assert at > 0
+    p.ed_deadline.pick(date(2026, 10, 16))
+    QApplication.processEvents()
+    assert w.plan.tasks[20].deadline == "2026-10-16"
+    assert bar.value() == at  # no jump to the top
+    w.add_folder("Grant")
+    p._fill_folder_combos()
+    p.ed_folder.setCurrentIndex(p.ed_folder.findData("Grant"))
+    QApplication.processEvents()
+    assert w.plan.tasks[20].folder == "Grant"
+    assert bar.value() == at
+
+
+def test_repeat_days_are_pills_that_show_the_choice(make, clock):
+    import focus_tool as ft
+    w = make()
+    p = _with_tasks(w, fc.Task("Walk", 10))
+    p.list.setCurrentRow(0)
+    p.ed_repeat.setCurrentIndex(ft.REPEAT_KINDS.index("days"))
+    assert p.ed_days[0].isChecked()  # today, Monday, is picked to start with
+    wed = p.ed_days[2]
+    assert isinstance(wed, QPushButton) and wed.isCheckable() and wed.objectName() == "pill"
+    wed.click()
+    assert w.plan.tasks[0].repeat == {"kind": "days", "days": ["mon", "wed"]}
+    assert p.ed_days[2].isChecked() and not p.ed_days[1].isChecked()
+
+
+def test_by_date_lists_repeats_by_their_next_day(make, clock):
+    w = make()  # today is Mon 10/12
+    p = _with_tasks(w, fc.Task("Grant", 30, deadline="2026-10-14"),
+                    fc.Task("Gym", 30, repeat={"kind": "days", "days": ["wed"]}),
+                    fc.Task("Walk", 5, repeat={"kind": "daily"}),
+                    fc.Task("Read", 20))
+    p.sort_combo.setCurrentIndex(1)
+    assert _texts(p.list) == ["📅 Due Mon 10/12 · 🔁 · 5m · Walk", "📅 Due Wed 10/14 · 30m · Grant",
+                              "📅 Due Wed 10/14 · 🔁 · 30m · Gym", "──  no date, in your order  ──", "20m · Read"]

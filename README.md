@@ -19,11 +19,15 @@ automatic day plan that lays your tasks out against your working hours.
    like, then "+ Add to list" (or Enter). New tasks go to the front of the
    list, so what you just added is the next thing you will work on.
 
-3. **Your list** is split into two parts:
-   - **By date**, tasks with a deadline or a target finish date, shown with
-     the closest date first, for example "Fri 10/16".
-   - **Your order**, everything else, in the order you put it in. Drag to
-     reorder, or use the up/down buttons, or "to top".
+3. **Your list** has two ways to sort, picked with "Sort" on the desktop and
+   the "My order" / "By date" tabs on the phone:
+   - **My order**, every task, dated or not, in the order you put it in. On
+     the desktop, drag a task by the ≡ sign at its left, or use the ↑ ↓ at its
+     right. Pressing a task and dragging it moves it without opening it; a
+     plain click opens it. On the phone, use ↑ ↓ or ⤒ (to the top).
+   - **By date**, tasks with a deadline or a target finish date first, the
+     closest date first, for example "Fri 10/16". The rest follow in your
+     order (on the phone they keep their ↑ ↓ ⤒ buttons there).
 
    Click a task and the same card at the top switches to "Selected task",
    where you change its name, time (pills), details, dates, folder or repeat
@@ -72,9 +76,9 @@ automatic day plan that lays your tasks out against your working hours.
    | `M` or the minus button | Shrink to a small circle. One click on the circle expands it again (dragging it only moves it) |
    | `Esc` or the close button | Hide the widget. `Ctrl+Alt+F` or the tray icon brings it back |
 
-   The All tasks window itself has a taskbar button. Its "–" button (next to
-   the full screen button) minimizes it, also from full screen. Enter or the
-   menu button on the widget, or its taskbar button, brings it back as it was.
+   The All tasks window is a normal window. Use the Windows title bar buttons to
+   minimize or maximize it, or press F11 for full screen (Esc leaves it). Enter or
+   the menu button on the widget, or its taskbar button, brings it back as it was.
 
 8. Drag the widget anywhere, on any monitor. It remembers where you left it.
    If that monitor is unplugged, it comes back on the primary screen.
@@ -145,8 +149,13 @@ skipped; nothing piles up or carries over.
 
 A repeating task can also have a deadline. It then repeats on its days up to
 and including the deadline, and the day after the deadline it leaves your list
-on its own (on every device). Such a task is listed with your dated tasks,
-sorted by its deadline. A repeating task never has an "aim to finish by" date.
+on its own (on every device). A repeating task never has an "aim to finish by"
+date.
+
+Every repeating task shows the next day it comes up as its due date (today when
+it is due today), in red, then the last day it repeats if it has one, for
+example "📅 Due Wed 10/14 · 🔁 until Fri 10/30 · 5m · Water plants". In the By
+date view it sits among your dated tasks by that next day.
 
 ## The day plan and the 7 pm job
 

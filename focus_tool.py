@@ -46,10 +46,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from PySide6.QtCore import (QAbstractNativeEventFilter, QDate, QEasingCurve, QEvent, QItemSelectionModel, QPoint,
                             QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Property, Signal)
 from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPen, QTextCharFormat
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCalendarWidget, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCalendarWidget, QComboBox,
                                QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                               QSystemTrayIcon, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import focus_core as fc
 import gh_store
@@ -464,6 +464,7 @@ def panel_stylesheet(c: dict) -> str:
     QFrame#card QWidget#grip:hover {{ background: {c['button_hover']}; }}
     QListWidget::item {{ padding: 6px 8px; border-radius: 8px; }}
     QListWidget::item:selected {{ background: {c['disk_track']}; color: {c['text']}; }}
+    QListWidget#tasks[reorder="true"]::item {{ padding: 6px 62px 6px 30px; }}
     QPushButton {{ background: {c['button']}; color: {c['button_text']}; border: none; border-radius: 10px;
         padding: 6px 12px; }}
     QPushButton:hover {{ background: {c['button_hover']}; }}
@@ -614,6 +615,14 @@ def due_text(t: fc.Task) -> str:
     if t.target:
         return f"{due}, 🎯 aim {short_date(t.target)}" if due else f"🎯 Aim {short_date(t.target)}"
     return due
+
+
+def repeat_text(t: fc.Task, today: date) -> str:
+    """How the list shows a repeating task: "📅 Due Wed 10/14 · 🔁 until Fri 10/30" (the next day it comes up,
+    then the last day it repeats), "📅 Due Wed 10/14 · 🔁" without a last day, or "🔁" when no day is left."""
+    due = fc.next_due_day(t, today)
+    until = f"🔁 until {short_date(t.deadline)}" if t.deadline else "🔁"
+    return f"📅 Due {short_date(due.isoformat())} · {until}" if due else until
 
 
 def first_date(t: fc.Task) -> str | None:
@@ -942,13 +951,122 @@ class DateButton(QPushButton):
         pop.show()
 
 
+class _TaskRowDelegate(QStyledItemDelegate):
+    """Draws the drag sign (≡) at the left of each task row and its ↑ ↓ buttons at the right, in My order."""
+
+    def __init__(self, lst: "TaskList", dim: QColor):
+        super().__init__(lst)
+        self.lst, self.dim = lst, dim
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if not self.lst.reorderable or not TaskList.is_task_data(index.data(Qt.UserRole)):
+            return
+        r = option.rect
+        painter.save()
+        font = QFont(option.font)
+        font.setPointSizeF(font.pointSizeF() * 1.35)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(self.dim)
+        painter.drawText(QRect(r.left(), r.top(), TaskList.HANDLE_W, r.height()), Qt.AlignCenter, "≡")
+        for delta, glyph in ((-1, "↑"), (1, "↓")):
+            painter.drawText(self.lst.arrow_rect(r, delta), Qt.AlignCenter, glyph)
+        painter.restore()
+
+
 class TaskList(QListWidget):
-    """The task list. Several tasks can be picked with Ctrl or Shift; choosing a row in code picks only it."""
+    """The task list. Several tasks can be picked with Ctrl or Shift; choosing a row in code picks only it.
+    In My order each task row has a drag sign (≡) at the left and ↑ ↓ buttons at the right. A task opens when
+    the mouse button goes up, not when it goes down, so pressing and dragging a task moves it without
+    unfolding its editor."""
+    settled = Signal()           # the mouse button went up after a press in the list, or a drag ended
+    arrow = Signal(object, int)  # a row's ↑ (-1) or ↓ (+1) was clicked: task id, direction
+    HANDLE_W, ARROW_W = 26, 26
+
+    def __init__(self, dim: QColor):
+        super().__init__()
+        self.setObjectName("tasks")
+        self.reorderable = False
+        self.holding = False  # the left button is down after a press in the list
+        self.setItemDelegate(_TaskRowDelegate(self, dim))
+        self.setWordWrap(True)  # a long name wraps, so the arrows at the right stay in view
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.viewport().setMouseTracking(True)
+
+    @staticmethod
+    def is_task_data(data) -> bool:
+        return data is not None and data not in (EDITOR_ROW, DIVIDER_ROW)
 
     def setCurrentRow(self, row: int, command=None):
         if command is None:
             command = QItemSelectionModel.ClearAndSelect if row >= 0 else QItemSelectionModel.Clear
         super().setCurrentRow(row, command)
+
+    def set_reorderable(self, on: bool):
+        """My order: tasks can be dragged and show ≡ and ↑ ↓. By date: none of that."""
+        self.setDragDropMode(QAbstractItemView.InternalMove if on else QAbstractItemView.NoDragDrop)
+        if on != self.reorderable:
+            self.reorderable = on
+            self.setProperty("reorder", on)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.viewport().update()
+
+    def arrow_rect(self, row_rect: QRect, delta: int) -> QRect:
+        right = min(row_rect.right(), self.viewport().width() - 1) - 4 - (self.ARROW_W if delta < 0 else 0)
+        return QRect(right - self.ARROW_W + 1, row_rect.top(), self.ARROW_W, row_rect.height())
+
+    def hit(self, pos) -> tuple:
+        """(task id, part) at a point in the list. part is -1 for ↑, +1 for ↓, 0 for the drag sign, else None."""
+        item = self.itemAt(pos)
+        if not self.reorderable or item is None or not self.is_task_data(item.data(Qt.UserRole)):
+            return None, None
+        r = self.visualItemRect(item)
+        for delta in (-1, 1):
+            if self.arrow_rect(r, delta).contains(pos):
+                return item.data(Qt.UserRole), delta
+        return item.data(Qt.UserRole), (0 if pos.x() < r.left() + self.HANDLE_W else None)
+
+    def _arrow_click(self, e) -> bool:
+        task_id, part = self.hit(e.position().toPoint())
+        if e.button() == Qt.LeftButton and part in (-1, 1):
+            self.arrow.emit(task_id, part)
+            e.accept()
+            return True
+        return False
+
+    def mousePressEvent(self, e):
+        if self._arrow_click(e):
+            return  # an arrow moves the task and leaves the selection alone
+        self.holding = e.button() == Qt.LeftButton
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if not self._arrow_click(e):  # quick clicks on an arrow each move the task
+            super().mouseDoubleClickEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() == Qt.NoButton:
+            part = self.hit(e.position().toPoint())[1]
+            self.viewport().setCursor(Qt.OpenHandCursor if part == 0 else
+                                      Qt.PointingHandCursor if part in (-1, 1) else Qt.ArrowCursor)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        self._settle()
+
+    def startDrag(self, actions):
+        try:
+            super().startDrag(actions)
+        finally:
+            self._settle()  # the drag took the button release
+
+    def _settle(self):
+        if self.holding:
+            self.holding = False
+            self.settled.emit()
 
 
 class TaskPanel(QWidget):
@@ -972,6 +1090,7 @@ class TaskPanel(QWidget):
         self._shown_time: str | None = None  # the open task's deadline time as saved (kept while the box is invalid)
         self._picks = 0  # counts selection changes, to tell a click that opens a task from one that folds it
         self._picks_at_press = -1
+        self._pick_pending = False  # a task was picked while the button was still down; it opens on release
         c = widget.s["colors"]
 
         root = QVBoxLayout(self)
@@ -995,14 +1114,6 @@ class TaskPanel(QWidget):
         b_done.setToolTip("Finish the task selected in the list")
         b_done.clicked.connect(self.done_selected)
         head.addWidget(b_done)
-        self.btn_full = QPushButton("⛶")
-        self.btn_full.setToolTip("Full screen (F11). Esc leaves it.")
-        self.btn_full.clicked.connect(self.toggle_full_screen)
-        head.addWidget(self.btn_full)
-        self.btn_min = QPushButton("–")
-        self.btn_min.setToolTip("Minimize to the taskbar. Enter or ☰ on the widget brings it back.")
-        self.btn_min.clicked.connect(self.minimize)
-        head.addWidget(self.btn_min)
         root.addLayout(head)
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
@@ -1118,7 +1229,7 @@ class TaskPanel(QWidget):
         root.addWidget(self.bulk)
 
         # -- the one list
-        self.list = TaskList()
+        self.list = TaskList(QColor(c["text_dim"]))
         self.list.setDefaultDropAction(Qt.MoveAction)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.list.verticalScrollBar().setSingleStep(20)
@@ -1131,6 +1242,8 @@ class TaskPanel(QWidget):
         self.list.itemClicked.connect(self._item_clicked)
         self.list.viewport().installEventFilter(self)
         self.list.model().rowsMoved.connect(self._rows_moved)
+        self.list.settled.connect(self._settled)
+        self.list.arrow.connect(self.move_task)
         root.addWidget(self.list, 1)
 
         # -- the editor; it lives in the list, in a row right under the selected task
@@ -1189,9 +1302,11 @@ class TaskPanel(QWidget):
         drow = QHBoxLayout(self.days_row)
         drow.setContentsMargins(0, 0, 0, 0)
         drow.setSpacing(6)
-        self.ed_days: list[QCheckBox] = []
+        self.ed_days: list[QPushButton] = []
         for label in DAY_LABELS:
-            cb = QCheckBox(label)
+            cb = QPushButton(label)  # a pill that turns green when its day is chosen
+            cb.setObjectName("pill")
+            cb.setCheckable(True)
             cb.toggled.connect(self._apply_editor)
             self.ed_days.append(cb)
             drow.addWidget(cb)
@@ -1327,8 +1442,6 @@ class TaskPanel(QWidget):
         else:
             self.showFullScreen()
         self.w.ui["panel_full"] = self.isFullScreen()
-        self.btn_full.setToolTip("Leave full screen (F11 or Esc)" if self.isFullScreen()
-                                 else "Full screen (F11). Esc leaves it.")
 
     def _details_resized(self, h: int):
         self.w.ui["details_h"] = h
@@ -1349,12 +1462,10 @@ class TaskPanel(QWidget):
             text = ("⏸ " if self.w.timer.paused else "▶ ") + task_label(t)
         else:
             text = ("⏸ " if t.spent_s else "") + task_label(t)  # paused to start another task
-        if t.repeat and t.deadline:
-            text = f"🔁 until {short_date(t.deadline)} · {text}"
+        if t.repeat:
+            text = f"{repeat_text(t, self.w.today())} · {text}"
         elif first_date(t):
             text = f"{due_text(t)} · {text}"
-        elif t.repeat:
-            text = "🔁 " + text
         if show_folder and t.folder:
             text += f"   📁 {t.folder}"
         return text
@@ -1372,7 +1483,7 @@ class TaskPanel(QWidget):
         if not self.by_date():
             return [t for t in self.w.plan.tasks if fc.in_folder(t, path)]
         dated, ranked = (([t for t in part if fc.in_folder(t, path)])
-                         for part in fc.display_sections(self.w.plan.tasks))
+                         for part in fc.display_sections(self.w.plan.tasks, self.w.today()))
         return dated + ([DIVIDER_ROW] if dated and ranked else []) + ranked
 
     def _task_by_id(self, task_id) -> fc.Task | None:
@@ -1404,6 +1515,7 @@ class TaskPanel(QWidget):
         keep = self.selected_ids() if select is _KEEP else ([] if select is None else [select])
         focus = QApplication.focusWidget()
         focus = focus if focus is not None and self.editor.isAncestorOf(focus) else None
+        scrolled = self.list.verticalScrollBar().value()  # the rebuilt list stays where it was
         self._updating = True
         self._detach_editor()
         self._fill_folder_combos()
@@ -1427,7 +1539,7 @@ class TaskPanel(QWidget):
                 tips.append(f"Deadline {short_date(t.deadline)}" + (f" at {hm}" if hm else ""))
             if t.target:
                 tips.append(f"Aim to finish by {short_date(t.target)}")
-            if t.deadline and not t.repeat:
+            if (t.deadline and not t.repeat) or (t.repeat and fc.next_due_day(t, self.w.today())):
                 item.setForeground(QColor(DUE_RED))
             if self.w.is_asleep(t):
                 item.setForeground(dim)
@@ -1435,8 +1547,7 @@ class TaskPanel(QWidget):
             if tips:
                 item.setToolTip("\n".join(tips))
             self.list.addItem(item)
-        self.list.setDragDropMode(QAbstractItemView.NoDragDrop if self.by_date()
-                                  else QAbstractItemView.InternalMove)
+        self.list.set_reorderable(not self.by_date())
         rows = [r for r in (self._row_of(i) for i in keep) if r >= 0]
         for r in rows:
             self.list.item(r).setSelected(True)
@@ -1444,6 +1555,8 @@ class TaskPanel(QWidget):
             self.list.setCurrentItem(self.list.item(rows[0]), QItemSelectionModel.NoUpdate)
         if len(rows) == 1:
             self._attach_editor(rows[0])
+        self.list.doItemsLayout()
+        self.list.verticalScrollBar().setValue(scrolled)
         self._show_bulk(len(rows))
         self.done_list.clear()
         for d in reversed(self.w.completed):
@@ -1611,6 +1724,10 @@ class TaskPanel(QWidget):
         if self._updating:
             return
         self._picks += 1
+        if self.list.holding:
+            self._pick_pending = True  # it opens when the button goes up, so a press can start a drag
+            return
+        self._pick_pending = False
         ids = self.selected_ids()
         self._updating = True
         self._detach_editor()
@@ -1621,6 +1738,10 @@ class TaskPanel(QWidget):
         self._load_editor()
         if self._editor_item is not None:
             QTimer.singleShot(0, self._show_editor_row)
+
+    def _settled(self):
+        if self._pick_pending:
+            self._selection_changed()
 
     def _show_editor_row(self):
         if self._editor_item is not None:
@@ -1952,15 +2073,21 @@ class TaskPanel(QWidget):
         if self._updating or self.by_date():
             return
         self._apply_order(self._shown_ids())
-        self.refresh()
+        self._pick_pending = False
+        self.refresh(None if self.list.holding else _KEEP)  # a dragged task stays folded
         self.w.changed()
 
     def move_selected(self, delta: int):
         t = self.selected_task()
-        if t is None or self.by_date():
-            return
+        if t is not None:
+            self.move_task(t.id, delta)
+
+    def move_task(self, task_id, delta: int):
+        """Move a task one place up (-1) or down (+1) among the tasks shown. My order only."""
         ids = self._shown_ids()
-        row = ids.index(t.id)
+        if self.by_date() or task_id not in ids:
+            return
+        row = ids.index(task_id)
         dst = row + delta
         if not 0 <= dst < len(ids):
             return
@@ -2249,7 +2376,7 @@ class FocusWidget(QWidget):
 
     def display_order(self) -> list[fc.Task]:
         """Tasks in the order the panel lists them, with dated tasks by date first and then the rest in your order."""
-        dated, ranked = fc.display_sections(self.plan.tasks)
+        dated, ranked = fc.display_sections(self.plan.tasks, self.today())
         return dated + ranked
 
     def current_task(self) -> fc.Task | None:
