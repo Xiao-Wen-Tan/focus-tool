@@ -1,0 +1,156 @@
+{
+  "description": "Folder notes: a changed summary gets the new stamp, a folder whose notes went missing is kept with empty text, a new progress note is stamped, a removed one gets a tombstone.",
+  "prev": {
+    "version": 3,
+    "plan": {
+      "tasks": []
+    },
+    "deleted": {},
+    "folder_notes": {
+      "Grant": {
+        "text": "Old summary",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "Home": {
+        "text": "Paint",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n1",
+        "folder": "Grant",
+        "at": "2026-10-12 09:00",
+        "text": "Budget sent",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      {
+        "id": "n2",
+        "folder": "Grant",
+        "at": "2026-10-12 10:00",
+        "text": "Letters asked for",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "cur": {
+    "version": 3,
+    "plan": {
+      "tasks": []
+    },
+    "deleted": {},
+    "folder_notes": {
+      "Grant": {
+        "text": "New summary",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n1",
+        "folder": "Grant",
+        "at": "2026-10-12 09:00",
+        "text": "Budget sent",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      {
+        "id": "n3",
+        "folder": "Grant",
+        "at": "2026-10-12 14:00",
+        "text": "Draft done",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "now": "2026-10-12T15:00:00.000Z",
+  "expected": {
+    "version": 4,
+    "plan": {
+      "tasks": []
+    },
+    "order_updated_at": "1970-01-01T00:00:00.000Z",
+    "folders": [],
+    "folders_updated_at": "1970-01-01T00:00:00.000Z",
+    "current_index": 0,
+    "timer": {
+      "task": null,
+      "task_id": null,
+      "estimate_min": 0,
+      "running": false,
+      "paused": false,
+      "started_at": null,
+      "banked_s": 0.0,
+      "fired": [],
+      "checkpoints": [
+        0.5,
+        0.9,
+        1.0
+      ],
+      "updated_at": "1970-01-01T00:00:00.000Z"
+    },
+    "done": [],
+    "deleted": {
+      "n2": "2026-10-12T15:00:00.000Z"
+    },
+    "planner": {
+      "tz": "America/Chicago",
+      "buffer_business_days": 2,
+      "windows": {
+        "mon": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "tue": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "wed": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "thu": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "fri": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "sat": [
+          "10:00-12:30"
+        ],
+        "sun": [
+          "10:00-12:30"
+        ]
+      },
+      "updated_at": "1970-01-01T00:00:00.000Z"
+    },
+    "geometry": null,
+    "folder_notes": {
+      "Grant": {
+        "text": "New summary",
+        "updated_at": "2026-10-12T15:00:00.000Z"
+      },
+      "Home": {
+        "text": "",
+        "updated_at": "2026-10-12T15:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n1",
+        "folder": "Grant",
+        "at": "2026-10-12 09:00",
+        "text": "Budget sent",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      {
+        "id": "n3",
+        "folder": "Grant",
+        "at": "2026-10-12 14:00",
+        "text": "Draft done",
+        "updated_at": "2026-10-12T15:00:00.000Z"
+      }
+    ]
+  }
+}

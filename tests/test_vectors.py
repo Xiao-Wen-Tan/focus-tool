@@ -83,6 +83,18 @@ def test_repeat_vector(case):
     assert fc.is_active(fc.task_from_dict(case["task"]), _d(case["day"])) is case["expected"]
 
 
+@pytest.mark.parametrize("case", _cases("repeat.json", "next_cases"))
+def test_next_active_day_vector(case):
+    got = fc.next_active_day(fc.task_from_dict(case["task"]), _d(case["after"]))
+    assert (got.isoformat() if got else None) == case["expected"]
+
+
+@pytest.mark.parametrize("case", _cases("repeat.json", "expired_cases"))
+def test_expired_repeats_vector(case):
+    tasks = [fc.task_from_dict(t) for t in case["tasks"]]
+    assert [t.id for t in fc.expired_repeats(tasks, _d(case["today"]))] == case["expected"]
+
+
 @pytest.mark.parametrize("case", _cases("folders.json"))
 def test_in_folder_vector(case):
     assert fc.in_folder(fc.task_from_dict(case["task"]), case["path"]) is case["expected"]

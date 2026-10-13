@@ -375,7 +375,7 @@ def test_box_write_merges_a_change_saved_meanwhile(env):
 def test_box_write_never_replaces_a_newer_file_saved_meanwhile(env):
     here = env.computer("a", github=False)
     add(here, "Alpha")
-    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    text = json.dumps({"version": 5, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     add(here, "Beta")
     assert (env.box / "state.json").read_text(encoding="utf-8") == text
@@ -418,9 +418,10 @@ def test_malformed_dates_from_another_device_do_not_crash(env, clock):
     add(a, "Alpha", deadline="soon")
     a.panel.show()
     a.panel.refresh()
-    assert any("Alpha" in x for x in _texts(a.panel.dated_list))
-    a.panel.dated_list.setCurrentRow(0)
-    assert not a.panel.ed_deadline_on.isChecked()
+    rows = [i for i in range(a.panel.list.count()) if "Alpha" in a.panel.list.item(i).text()]
+    assert rows
+    a.panel.list.setCurrentRow(rows[0])
+    assert a.panel.ed_deadline.value() is None
     assert a.current_task() is not None
     a.replan_now()  # never raises; the planner's complaint goes to the status line
 
@@ -516,7 +517,7 @@ def test_disconnect_cancels_queued_and_running_jobs(env):
 
 def test_a_newer_box_file_does_not_block_github_mode(env):
     env.box.mkdir(parents=True)
-    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    text = json.dumps({"version": 5, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     a = env.computer("a")
     add(a, "Alpha")
@@ -613,7 +614,7 @@ def test_a_newer_box_file_saved_during_github_mode_is_not_overwritten(env):
     a = env.computer("a")
     add(a, "Alpha")
     a.sync_now()
-    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    text = json.dumps({"version": 5, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     add(a, "Beta")
     assert a.sync_now().status == "ok"

@@ -72,6 +72,10 @@ automatic day plan that lays your tasks out against your working hours.
    | `M` or the minus button | Shrink to a small circle. One click on the circle expands it again (dragging it only moves it) |
    | `Esc` or the close button | Hide the widget. `Ctrl+Alt+F` or the tray icon brings it back |
 
+   The All tasks window itself has a taskbar button. Its "–" button (next to
+   the full screen button) minimizes it, also from full screen. Enter or the
+   menu button on the widget, or its taskbar button, brings it back as it was.
+
 8. Drag the widget anywhere, on any monitor. It remembers where you left it.
    If that monitor is unplugged, it comes back on the primary screen.
 
@@ -81,6 +85,19 @@ A task can have a **deadline** (a hard date it must be done by) and a
 **target** (the date you expect to finish it by, softer than a deadline). Set
 either or both in the editor; leave a date off and the task follows your
 manual order instead.
+
+The two kinds look different in the list, on the desktop, on the phone and in
+the day plan. A hard deadline shows as "📅 Due Fri 10/16" in red, a target as
+"🎯 Aim Mon 10/19" in the normal colour, and a task with both as
+"📅 Due Fri 10/16, 🎯 aim Wed 10/14".
+
+A deadline can also have a time of day, for example 5pm. Type it in the small
+box next to the deadline date (5pm, 5:30pm and 17:00 all work), or leave it
+empty to mean the end of that day. The list then shows "📅 Due Fri 10/16
+5:00pm". The day plan counts the task as overdue from that minute, and on the
+deadline day itself it only plans work on it before that time. A target date
+has no time, and neither does a repeating task's deadline (it only says the
+last day it repeats).
 
 The day plan (below) finishes dated tasks two business days (Monday to
 Friday) before the date itself, so you are never racing the actual deadline.
@@ -97,6 +114,24 @@ Folders cannot have their own dates. Use "Folders..." to rename or delete a
 folder; deleting one leaves its tasks without a folder, it does not delete the
 tasks.
 
+### Folder notes
+
+When the list shows one folder, a "📝 Notes" box appears above its tasks (on
+the desktop and on the phone). It has two parts:
+
+- a **summary**, one free text box for where the project stands and what
+  comes next. It saves by itself a moment after you stop typing (on the phone,
+  when you leave the box).
+- **progress notes**, short dated entries. Type one and press Enter (or Add)
+  and it is stamped with today's date. They are listed newest first, and each
+  one can be edited or deleted.
+
+Click the "📝 Notes" line to fold the box away. Notes follow a folder when you
+rename it. Deleting a folder keeps its notes, and they show again if you make
+a folder with the same name. Progress notes written on the phone and on the
+desktop are merged, so none are lost. If the same summary is changed on two
+devices before they sync, the later change wins.
+
 ## Repeating tasks
 
 A task can repeat: every day, on weekdays, on chosen days of the week, or
@@ -107,6 +142,11 @@ day it is not due, it is greyed out and cannot be started.
 Pressing Done on a repeating task logs that day's copy to Completed and the
 task goes back to sleep until its next due day. If you miss a day, it is just
 skipped; nothing piles up or carries over.
+
+A repeating task can also have a deadline. It then repeats on its days up to
+and including the deadline, and the day after the deadline it leaves your list
+on its own (on every device). Such a task is listed with your dated tasks,
+sorted by its deadline. A repeating task never has an "aim to finish by" date.
 
 ## The day plan and the 7 pm job
 

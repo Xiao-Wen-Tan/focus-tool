@@ -3,11 +3,13 @@
 What lives here:
 - parse_plan: turns the pasted list into tasks (name, estimate, details).
 - TimerState: the countdown for the current task (remaining, elapsed, overtime, checkpoints).
-- list_end / save_state / load_state: finish-time projection and JSON persistence (state.json version 3).
+- list_end / save_state / load_state: finish-time projection and JSON persistence (state.json version 4).
 - migrate_doc / merge_docs / stamp_changes: read older files, and combine two copies of the list
   (phone and desktop) so that neither side loses an edit.
 - display_sections / reorder_ranked / finish_by / next_block: the dated and ranked parts of the list.
-- is_active / complete_repeat: repeating tasks.  in_folder / folder_tree / rename_folder / delete_folder: folders.
+- is_active / next_active_day / expired_repeats / complete_repeat: repeating tasks. A repeating task
+  may have a deadline, which means it repeats until that day and then leaves the list.
+- in_folder / folder_tree / rename_folder / delete_folder: folders.
 - merge_states / merge_lines: fold one computer's old list into the list shared through Box.
 """
 from __future__ import annotations
@@ -21,7 +23,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-STATE_VERSION = 3  # 3 adds ids, dates, folders, repeats and change stamps; versions 1 and 2 still load
+STATE_VERSION = 4  # 3 adds ids, dates, folders, repeats and change stamps; 4 adds deadline times and folder
+# notes (a new number, so older apps refuse to write a list they would drop those from). 1 to 3 still load
 EPOCH = "1970-01-01T00:00:00.000Z"
 NS = uuid.UUID("212d6585-c191-5e24-9304-4a619852c6c3")  # fixed namespace for ids made from names (migration)
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -60,13 +63,14 @@ class Task:
     estimate_min: int
     details: str = ""
     spent_s: float = 0.0  # time used before another task was started over it; picked up again when it restarts
-    deadline: Optional[str] = None  # "YYYY-MM-DD", a hard date
-    target: Optional[str] = None  # "YYYY-MM-DD", the date you aim to finish by
+    deadline: Optional[str] = None  # "YYYY-MM-DD", a hard date; on a repeating task, the last day it repeats
+    target: Optional[str] = None  # "YYYY-MM-DD", the date you aim to finish by; never set on a repeating task
     folder: Optional[str] = None  # "/"-separated path such as "Garden/Seeds"
     repeat: Optional[dict] = None  # see is_active
     last_done: Optional[str] = None  # "YYYY-MM-DD" a repeating task was last done
     id: str = field(default_factory=new_id)
     updated_at: str = EPOCH
+    deadline_time: Optional[str] = None  # "HH:MM" (24-hour) the deadline falls at; None means the end of that day
 
 
 @dataclass
@@ -297,11 +301,13 @@ class DoneTask:
     target: Optional[str] = None
     folder: Optional[str] = None
     updated_at: str = EPOCH
+    deadline_time: Optional[str] = None
 
 
 def done_to_task(d: DoneTask) -> Task:
     """Put a completed task back on the list (with a new id) with its estimate, details, dates and folder."""
-    return Task(d.name, d.estimate_min, d.details, deadline=d.deadline, target=d.target, folder=d.folder)
+    return Task(d.name, d.estimate_min, d.details, deadline=d.deadline, target=d.target, folder=d.folder,
+                deadline_time=d.deadline_time)
 
 
 @dataclass
@@ -316,10 +322,16 @@ class State:
     planner: Optional[dict] = None  # None means DEFAULT_PLANNER
     folders: list = field(default_factory=list)
     folders_updated_at: str = EPOCH
+    # Notes per folder path: {"text": summary, "updated_at": stamp}. Kept when a folder is deleted.
+    folder_notes: dict = field(default_factory=dict)
+    # Dated progress notes: [{"id", "folder", "at": "YYYY-MM-DD HH:MM" local, "text", "updated_at"}]
+    progress: list = field(default_factory=list)
 
 
-_TASK_FIELDS = ("name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done")
-_DONE_FIELDS = ("name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder")
+_TASK_FIELDS = ("name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done",
+                "deadline_time")
+_DONE_FIELDS = ("name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder",
+                "deadline_time")
 
 
 def task_to_dict(t: Task) -> dict:
@@ -333,7 +345,8 @@ def task_from_dict(x: dict) -> Task:
     return Task(x["name"], int(x["estimate_min"]), x.get("details", ""), float(x.get("spent_s", 0.0)),
                 deadline=x.get("deadline"), target=x.get("target"), folder=x.get("folder"),
                 repeat=copy.deepcopy(x.get("repeat")), last_done=x.get("last_done"),
-                id=x.get("id") or new_id(), updated_at=x.get("updated_at") or EPOCH)
+                id=x.get("id") or new_id(), updated_at=x.get("updated_at") or EPOCH,
+                deadline_time=x.get("deadline_time"))
 
 
 def _done_to_dict(d: DoneTask) -> dict:
@@ -346,11 +359,12 @@ def _done_to_dict(d: DoneTask) -> dict:
 def _done_from_dict(x: dict) -> DoneTask:
     return DoneTask(x["name"], int(x["estimate_min"]), int(x["actual_min"]), x.get("finished_at", ""),
                     x.get("details", ""), id=x.get("id") or new_id(), deadline=x.get("deadline"),
-                    target=x.get("target"), folder=x.get("folder"), updated_at=x.get("updated_at") or EPOCH)
+                    target=x.get("target"), folder=x.get("folder"), updated_at=x.get("updated_at") or EPOCH,
+                    deadline_time=x.get("deadline_time"))
 
 
 def state_to_doc(st: State) -> dict:
-    """The state.json version 3 document for a State."""
+    """The state.json version 4 document for a State."""
     return {
         "version": STATE_VERSION,
         "plan": {"tasks": [task_to_dict(t) for t in st.plan.tasks]},
@@ -363,6 +377,8 @@ def state_to_doc(st: State) -> dict:
         "deleted": dict(st.deleted),
         "planner": copy.deepcopy(st.planner if st.planner is not None else DEFAULT_PLANNER),
         "geometry": st.geometry,
+        "folder_notes": copy.deepcopy(st.folder_notes),
+        "progress": copy.deepcopy(st.progress),
     }
 
 
@@ -380,6 +396,8 @@ def doc_to_state(d: dict) -> State:
         planner=d["planner"],
         folders=list(d["folders"]),
         folders_updated_at=d["folders_updated_at"],
+        folder_notes=d["folder_notes"],
+        progress=d["progress"],
     )
 
 
@@ -404,8 +422,22 @@ def _fill_done(x: dict) -> dict:
     return out
 
 
+def _fill_notes(x) -> dict:
+    out = {}
+    for path, v in (x or {}).items() if isinstance(x, dict) else ():
+        if isinstance(v, dict):
+            out[path] = {"text": v.get("text") or "", "updated_at": v.get("updated_at") or EPOCH}
+    return out
+
+
+def _fill_progress(x: dict) -> dict:
+    folder, at, text = x.get("folder"), x.get("at") or "", x.get("text") or ""
+    return {"id": x.get("id") or _migrated_id("note", f"{folder or ''}#{at}#{text}"), "folder": folder, "at": at,
+            "text": text, "updated_at": x.get("updated_at") or EPOCH}
+
+
 def migrate_doc(d: dict) -> dict:
-    """A complete version 3 document from a version 1, 2 or 3 one, with every missing field filled in.
+    """A complete version 4 document from a version 1, 2, 3 or 4 one, with every missing field filled in.
 
     Ids made here depend only on the old content, so two computers that migrate the same file agree:
     task id = uuid5(NS, "task:" + name + "#" + n) where n counts earlier tasks with the same name (0, 1, ...),
@@ -432,7 +464,7 @@ def migrate_doc(d: dict) -> dict:
     timer.update(copy.deepcopy(old_timer))
     timer["updated_at"] = timer.get("updated_at") or EPOCH
     current_index = int(d.get("current_index", 0))
-    if version < STATE_VERSION or "task_id" not in old_timer:
+    if version < 3 or "task_id" not in old_timer:
         timer["task_id"] = None
         name = timer.get("task")
         if name is not None:
@@ -454,6 +486,8 @@ def migrate_doc(d: dict) -> dict:
         "deleted": dict(d.get("deleted") or {}),
         "planner": planner,
         "geometry": d.get("geometry"),
+        "folder_notes": _fill_notes(d.get("folder_notes")),
+        "progress": [_fill_progress(x) for x in d.get("progress") or [] if isinstance(x, dict)],
     }
 
 
@@ -466,7 +500,7 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def save_state_obj(path: Path, st: State) -> str:
-    """Write the whole State as version 3 in one step (temp file, then rename) and return the text written."""
+    """Write the whole State as version 4 in one step (temp file, then rename) and return the text written."""
     text = json.dumps(state_to_doc(st), indent=2, ensure_ascii=False)
     _write_text(path, text)
     return text
@@ -576,6 +610,11 @@ def merge_docs(a: dict, b: dict) -> dict:
     used = sorted({p for t in tasks if t.get("folder") for p in _with_parents(t["folder"])} - set(folders))
     folders += used
     ids = [t["id"] for t in tasks]
+    blank = {"text": "", "updated_at": EPOCH}
+    notes = {p: copy.deepcopy(_newer(a["folder_notes"].get(p, blank), b["folder_notes"].get(p, blank)))
+             for p in sorted(set(a["folder_notes"]) | set(b["folder_notes"]))}
+    progress = sorted((x for i, x in _union_by_id(a["progress"], b["progress"]).items() if i not in deleted),
+                      key=lambda x: (x["at"], x["id"]))
     return {
         "version": STATE_VERSION,
         "plan": {"tasks": copy.deepcopy(tasks)},
@@ -588,6 +627,8 @@ def merge_docs(a: dict, b: dict) -> dict:
         "deleted": deleted,
         "planner": planner,
         "geometry": None,
+        "folder_notes": notes,
+        "progress": copy.deepcopy(progress),
     }
 
 
@@ -635,6 +676,20 @@ def stamp_changes(prev: Optional[dict], cur: dict, now: str) -> dict:
         cur["planner"]["updated_at"] = now
     if cur["folders"] != prev["folders"]:
         cur["folders_updated_at"] = now
+    for path, old in prev["folder_notes"].items():
+        cur["folder_notes"].setdefault(path, {"text": "", "updated_at": old["updated_at"]})
+    for path, n in cur["folder_notes"].items():
+        if n["text"] != prev["folder_notes"].get(path, {}).get("text", ""):
+            n["updated_at"] = now
+    prev_notes = {x["id"]: x for x in prev["progress"]}
+    for x in cur["progress"]:
+        old = prev_notes.get(x["id"])
+        if old is None or any(x[k] != old[k] for k in ("folder", "at", "text")):
+            x["updated_at"] = now
+    cur_notes = {x["id"] for x in cur["progress"]}
+    for i in prev_notes:
+        if i not in cur_notes:
+            cur["deleted"][i] = now
     cutoff = _iso_minus_days(now, TOMBSTONE_DAYS)
     cur["deleted"] = {k: v for k, v in cur["deleted"].items() if v >= cutoff}
     return cur
@@ -648,10 +703,16 @@ def _is_dated(t: Task) -> bool:
 
 def display_sections(tasks: List[Task]) -> tuple:
     """(dated, ranked). Dated: tasks with a deadline or target, earliest date first, a deadline before a
-    target-only task on the same date, then list order. Ranked: all other tasks (repeats too) in list order."""
-    dated = [(min(x for x in (t.deadline, t.target) if x), t.deadline is None, i, t)
-             for i, t in enumerate(tasks) if _is_dated(t)]
-    return [x[3] for x in sorted(dated, key=lambda x: x[:3])], [t for t in tasks if not _is_dated(t)]
+    target-only task on the same date, an earlier deadline time first (no time counts as day end), then
+    list order. A repeating task with a deadline is dated like any
+    other. Ranked: all other tasks (repeats without a deadline too) in list order."""
+    dated = []
+    for i, t in enumerate(tasks):
+        if _is_dated(t):
+            first = min(x for x in (t.deadline, t.target) if x)
+            hm = parse_hm(t.deadline_time) if first == t.deadline else None
+            dated.append((first, t.deadline is None, 1440 if hm is None else hm, i, t))
+    return [x[4] for x in sorted(dated, key=lambda x: x[:4])], [t for t in tasks if not _is_dated(t)]
 
 
 def reorder_ranked(tasks: List[Task], ranked_ids: list) -> List[Task]:
@@ -690,6 +751,40 @@ def next_block(day_plan: Optional[dict], now: datetime, live_ids: set) -> Option
 
 # ---------------------------------------------------------------- repeating tasks
 
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_day(s) -> Optional[date]:
+    """A "YYYY-MM-DD" text as a date, or None when it is missing or not a real day (never raises)."""
+    if not isinstance(s, str) or not _DAY_RE.match(s):
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+_TIME_RE = re.compile(r"^\d{2}:\d{2}$")
+
+
+def parse_hm(s) -> Optional[int]:
+    """An "HH:MM" (24-hour) text as minutes after midnight, or None when it is missing or not a real time
+    (never raises). A deadline time that is not a real time counts as none, so the deadline is at day end."""
+    if not isinstance(s, str) or not _TIME_RE.match(s):
+        return None
+    hh, mm = int(s[:2]), int(s[3:])
+    return hh * 60 + mm if hh < 24 and mm < 60 else None
+
+
+def fmt_hm(s) -> str:
+    """A deadline time for people to read: "17:00" -> "5:00pm", "09:30" -> "9:30am"; "" when not a real time."""
+    m = parse_hm(s)
+    if m is None:
+        return ""
+    hh, mm = divmod(m, 60)
+    return f"{(hh % 12) or 12}:{mm:02d}{'am' if hh < 12 else 'pm'}"
+
+
 def _rule_matches(rule: dict, day: date) -> bool:
     kind = rule.get("kind")
     if kind == "daily":
@@ -707,27 +802,45 @@ def _rule_matches(rule: dict, day: date) -> bool:
 def is_active(task: Task, day: date) -> bool:
     """A repeating task is active on days its rule matches, unless it was already done that day.
     "every" counts from its anchor date on the calendar, so a skipped day does not shift it.
+    A repeating task with a deadline repeats up to and including that day, and is never active after it.
     A task that does not repeat is always active."""
     if not task.repeat:
         return True
+    end = _parse_day(task.deadline)
+    if end is not None and day > end:
+        return False
     return _rule_matches(task.repeat, day) and task.last_done != day.isoformat()
 
 
 def next_active_day(task: Task, after: date) -> Optional[date]:
-    """The first day after `after` on which a repeating task is active; None for a task that does not repeat."""
+    """The first day after `after` on which a repeating task is active; None for a task that does not repeat,
+    and None when that day would come after the task's deadline."""
     if not task.repeat:
         return None
+    end = _parse_day(task.deadline)
     rule = task.repeat
     if rule.get("kind") == "every":
         anchor, step = date.fromisoformat(rule["anchor"]), max(1, int(rule.get("every", 1)))
         gap = (after + timedelta(days=1) - anchor).days
         d = anchor if gap <= 0 else anchor + timedelta(days=-(-gap // step) * step)
-        return d if is_active(task, d) else d + timedelta(days=step)
+        d = d if is_active(task, d) else d + timedelta(days=step)
+        return None if end is not None and d > end else d
     for n in range(1, 16):
         d = after + timedelta(days=n)
         if is_active(task, d):
             return d
     return None
+
+
+def expired_repeats(tasks: Iterable[Task], today: date) -> List[Task]:
+    """The repeating tasks whose deadline is before `today`. They are finished with and should leave the list.
+    A deadline that is not a real "YYYY-MM-DD" day counts as no deadline, so that task is never expired."""
+    out = []
+    for t in tasks:
+        end = _parse_day(t.deadline) if t.repeat else None
+        if end is not None and end < today:
+            out.append(t)
+    return out
 
 
 def complete_repeat(task: Task, now: datetime, actual_min: int) -> DoneTask:
@@ -747,7 +860,8 @@ def finish_task(task: Task, now: datetime, actual_min: int) -> DoneTask:
     if task.repeat:
         return complete_repeat(task, now, actual_min)
     return DoneTask(task.name, task.estimate_min, int(actual_min), f"{now:%Y-%m-%d %H:%M}", task.details,
-                    id=task.id, deadline=task.deadline, target=task.target, folder=task.folder)
+                    id=task.id, deadline=task.deadline, target=task.target, folder=task.folder,
+                    deadline_time=task.deadline_time)
 
 
 # ---------------------------------------------------------------- folders
@@ -784,10 +898,20 @@ def rename_folder(state: State, old: str, new: str) -> None:
     state.folders = _complete_parents([move(p) for p in state.folders])
     for t in list(state.plan.tasks) + list(state.done):
         t.folder = move(t.folder)
+    for p in sorted(p for p in state.folder_notes if _under(p, old)):
+        text = state.folder_notes[p]["text"]
+        if not text:
+            continue
+        to = state.folder_notes.setdefault(move(p), {"text": "", "updated_at": EPOCH})
+        to["text"] = to["text"] + "\n\n" + text if to["text"].strip() else text
+        state.folder_notes[p]["text"] = ""
+    for x in state.progress:
+        x["folder"] = move(x["folder"])
 
 
 def delete_folder(state: State, path: str) -> None:
-    """Remove folder `path` and its subfolders; their tasks stay on the list without a folder."""
+    """Remove folder `path` and its subfolders; their tasks stay on the list without a folder. Its notes are
+    kept, and show again if a folder with the same name is made later."""
     state.folders = [p for p in state.folders if not _under(p, path)]
     for t in state.plan.tasks:
         if _under(t.folder, path):
@@ -811,7 +935,8 @@ def merge_states(shared: State, old: State) -> State:
     if not shared.timer.running and old.timer.running:
         timer = old.timer
         index = next((i for i, t in enumerate(tasks) if t.name == old.timer.task), 0)
-    return State(Plan(tasks), index, timer, None, done)
+    return State(Plan(tasks), index, timer, None, done, folder_notes=copy.deepcopy(shared.folder_notes),
+                 progress=copy.deepcopy(shared.progress))
 
 
 def merge_lines(have: str, extra: str) -> str:

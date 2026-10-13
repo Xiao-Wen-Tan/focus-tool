@@ -1,4 +1,4 @@
-"""Convert a Focus Tool state file (version 1, 2 or 3) to a complete version 3 file.
+"""Convert a Focus Tool state file (version 1, 2, 3 or 4) to a complete version 4 file.
 
 Usage: python tools/migrate_state.py IN.json OUT.json
 

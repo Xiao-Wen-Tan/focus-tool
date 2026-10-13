@@ -197,6 +197,40 @@ def test_repeats_on_later_days_reduce_capacity_for_dated_work():
     assert p["outlook"] and all(o["task_id"] != "walk" for o in p["outlook"])
 
 
+def test_repeat_with_deadline_is_planned_as_a_repeat_on_and_before_its_deadline():
+    # The deadline is the plan day itself. As dated work it would be urgent with an "in buffer" warning;
+    # as a repeat it is an ordinary ranked block with no date and no warning.
+    st = state_of(T("Walk", 20, repeat={"kind": "daily"}, deadline="2026-10-13"), T("Plain", 10))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "09:20", "Walk", "ranked"), ("09:20", "09:30", "Plain", "ranked")]
+    walk = p["blocks"][0]
+    assert walk["repeat"] is True and walk["date"] is None and walk["date_kind"] is None
+    assert p["warnings"] == [] and p["outlook"] == []
+
+
+def test_repeat_with_deadline_is_not_planned_after_its_deadline():
+    st = state_of(T("Walk", 20, repeat={"kind": "daily"}, deadline="2026-10-12"), T("Plain", 10))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "09:10", "Plain", "ranked")]
+    assert p["warnings"] == []
+
+
+def test_repeat_with_deadline_holds_time_on_later_days_only_up_to_its_deadline():
+    walk = T("Walk", 30, repeat={"kind": "daily"}, deadline="2026-10-15")
+    cal = planner._Calendar(CFG, TUE, None, [(walk, 30)])
+    assert cal.total(date(2026, 10, 14)) == 420  # Wednesday: 450 minutes less the walk
+    assert cal.total(date(2026, 10, 15)) == 420  # Thursday, the deadline: still held
+    assert cal.total(date(2026, 10, 16)) == 450  # Friday: past the deadline, the full day is free
+
+
+def test_repeat_with_deadline_does_not_reserve_dated_slots():
+    st = state_of(T("Walk", 30, repeat={"kind": "daily"}, deadline="2026-10-20"),
+                  T("D", 450, deadline="2026-10-16"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert all(b["kind"] == "ranked" for b in p["blocks"] if b["task_id"] == "walk")
+    assert all(o["task_id"] != "walk" for o in p["outlook"])
+
+
 # ---------- modes
 
 def doc_of(*tasks, timer=None):
@@ -272,3 +306,62 @@ def test_cli_skip_leaves_the_file_untouched(tmp_path):
     rc = planner.main(["--state", str(state), "--out", str(out), "--mode", "auto",
                        "--now", "2026-10-12T22:00:00Z"])  # 17:00 CDT, too early
     assert rc == 0 and out.read_text(encoding="utf-8") == text
+
+
+# ---------- deadline time of day
+
+def test_deadline_time_today_gets_work_only_before_it():
+    st = state_of(T("Form", 120, deadline="2026-10-13", deadline_time="10:00"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "10:00", "Form", "urgent")]
+    assert p["blocks"][0]["time"] == "10:00" and p["blocks"][0]["date_kind"] == "deadline"
+    assert outlook(p) == [("form", "2026-10-14", 60)]  # what did not fit before 10:00 goes after it
+    assert kinds(p) == [("Form", "in_buffer")]
+    assert "Tue 10/13 10:00am" in p["warnings"][0]["message"]
+
+
+def test_deadline_time_already_passed_today_is_overdue():
+    st = state_of(T("Form", 60, deadline="2026-10-13", deadline_time="10:00"))
+    p = planner.plan_day(st, TUE, time(10, 30), CFG)
+    assert kinds(p) == [("Form", "overdue")]
+    assert p["warnings"][0]["message"] == "its deadline Tue 10/13 10:00am has passed"
+
+
+def test_deadline_without_time_is_not_overdue_until_the_day_ends():
+    st = state_of(T("Form", 60, deadline="2026-10-13"))
+    p = planner.plan_day(st, TUE, time(17, 0), CFG)
+    assert kinds(p) == [("Form", "in_buffer")]
+    assert p["blocks"][0]["time"] is None
+
+
+def test_deadline_time_limits_the_hard_pass_on_the_deadline_day():
+    cfg = copy.deepcopy(CFG)
+    cfg["buffer_business_days"] = 0
+    st = state_of(T("Talk", 300, deadline="2026-10-13", deadline_time="12:00"))
+    p = planner.plan_day(st, TUE, None, cfg)
+    assert rows(p) == [("09:00", "12:00", "Talk", "dated")]
+    assert kinds(p) == [("Talk", "deadline_missed")]
+    assert p["warnings"][0]["minutes"] == 120
+    assert p["warnings"][0]["message"] == "needs 120 min more than fits before Tue 10/13 12:00pm"
+
+
+def test_deadline_time_that_is_not_a_real_time_counts_as_day_end():
+    cfg = copy.deepcopy(CFG)
+    cfg["buffer_business_days"] = 0
+    st = state_of(T("Talk", 300, deadline="2026-10-13", deadline_time="noon"))
+    p = planner.plan_day(st, TUE, None, cfg)
+    assert sum(b["minutes"] for b in p["blocks"]) == 300
+    assert p["warnings"] == [] and p["blocks"][0]["time"] is None
+
+
+def test_take_alap_until_keeps_the_time_after_it_free():
+    cal = planner._Calendar(CFG, TUE, None, [])
+    assert cal.take_alap(TUE, 60, until=15 * 60) == [(14 * 60, 15 * 60)]
+    assert cal.day(TUE) == [[9 * 60, 12 * 60], [13 * 60 + 30, 14 * 60], [15 * 60, 18 * 60]]
+    assert cal.total(TUE, until=10 * 60) == 60
+    assert cal.take_asap(TUE, 500, until=10 * 60) == [(9 * 60, 10 * 60)]
+
+
+def test_fmt_hm():
+    assert [fc.fmt_hm(x) for x in ("00:05", "09:30", "12:00", "17:00", "bad")] == ["12:05am", "9:30am", "12:00pm",
+                                                                                   "5:00pm", ""]

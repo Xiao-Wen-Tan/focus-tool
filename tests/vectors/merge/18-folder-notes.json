@@ -1,0 +1,157 @@
+{
+  "description": "Folder notes: per folder the newer summary wins; progress notes merge by id, the newer edit wins, a deleted note stays deleted, and notes are sorted by when they were written.",
+  "a": {
+    "version": 3,
+    "plan": {
+      "tasks": []
+    },
+    "deleted": {},
+    "folder_notes": {
+      "Grant": {
+        "text": "Summary from the desktop",
+        "updated_at": "2026-10-12T10:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n1",
+        "folder": "Grant",
+        "at": "2026-10-12 09:00",
+        "text": "Budget sent",
+        "updated_at": "2026-10-12T09:00:00.000Z"
+      },
+      {
+        "id": "n2",
+        "folder": "Grant",
+        "at": "2026-10-12 10:00",
+        "text": "Letters asked for (edited on desktop)",
+        "updated_at": "2026-10-12T10:30:00.000Z"
+      }
+    ]
+  },
+  "b": {
+    "version": 3,
+    "plan": {
+      "tasks": []
+    },
+    "deleted": {
+      "n1": "2026-10-12T12:00:00.000Z"
+    },
+    "folder_notes": {
+      "Grant": {
+        "text": "Summary from the phone",
+        "updated_at": "2026-10-12T11:00:00.000Z"
+      },
+      "Home": {
+        "text": "Paint the fence",
+        "updated_at": "2026-10-12T08:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n2",
+        "folder": "Grant",
+        "at": "2026-10-12 10:00",
+        "text": "Letters asked for",
+        "updated_at": "2026-10-12T10:00:00.000Z"
+      },
+      {
+        "id": "n3",
+        "folder": "Home",
+        "at": "2026-10-11 18:00",
+        "text": "Bought paint",
+        "updated_at": "2026-10-11T18:00:00.000Z"
+      }
+    ]
+  },
+  "expected": {
+    "version": 4,
+    "plan": {
+      "tasks": []
+    },
+    "order_updated_at": "1970-01-01T00:00:00.000Z",
+    "folders": [],
+    "folders_updated_at": "1970-01-01T00:00:00.000Z",
+    "current_index": 0,
+    "timer": {
+      "task": null,
+      "task_id": null,
+      "estimate_min": 0,
+      "running": false,
+      "paused": false,
+      "started_at": null,
+      "banked_s": 0.0,
+      "fired": [],
+      "checkpoints": [
+        0.5,
+        0.9,
+        1.0
+      ],
+      "updated_at": "1970-01-01T00:00:00.000Z"
+    },
+    "done": [],
+    "deleted": {
+      "n1": "2026-10-12T12:00:00.000Z"
+    },
+    "planner": {
+      "tz": "America/Chicago",
+      "buffer_business_days": 2,
+      "windows": {
+        "mon": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "tue": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "wed": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "thu": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "fri": [
+          "09:00-12:00",
+          "13:30-18:00"
+        ],
+        "sat": [
+          "10:00-12:30"
+        ],
+        "sun": [
+          "10:00-12:30"
+        ]
+      },
+      "updated_at": "1970-01-01T00:00:00.000Z"
+    },
+    "geometry": null,
+    "folder_notes": {
+      "Grant": {
+        "text": "Summary from the phone",
+        "updated_at": "2026-10-12T11:00:00.000Z"
+      },
+      "Home": {
+        "text": "Paint the fence",
+        "updated_at": "2026-10-12T08:00:00.000Z"
+      }
+    },
+    "progress": [
+      {
+        "id": "n3",
+        "folder": "Home",
+        "at": "2026-10-11 18:00",
+        "text": "Bought paint",
+        "updated_at": "2026-10-11T18:00:00.000Z"
+      },
+      {
+        "id": "n2",
+        "folder": "Grant",
+        "at": "2026-10-12 10:00",
+        "text": "Letters asked for (edited on desktop)",
+        "updated_at": "2026-10-12T10:30:00.000Z"
+      }
+    ]
+  }
+}

@@ -73,6 +73,18 @@ for (const c of cases("repeat.json")) {
   });
 }
 
+for (const c of cases("repeat.json", "next_cases")) {
+  test(`next_active_day: ${c.description}`, () => {
+    assert.equal(core.nextActiveDay(c.task, c.after), c.expected);
+  });
+}
+
+for (const c of cases("repeat.json", "expired_cases")) {
+  test(`expired_repeats: ${c.description}`, () => {
+    assert.deepEqual(core.expiredRepeats(c.tasks, c.today).map((t) => t.id), c.expected);
+  });
+}
+
 for (const c of cases("folders.json")) {
   test(`in_folder: ${c.description}`, () => {
     assert.equal(core.inFolder(c.task, c.path), c.expected);
@@ -101,24 +113,28 @@ test("roundHalfEven matches Python round", () => {
   assert.deepEqual([0.5, 1.5, 2.5, 3.5, 2.4, 2.6].map(core.roundHalfEven), [0, 2, 2, 4, 2, 3]);
 });
 
-test("normalizeDoc refuses version 2 and version 4, fills a v3 doc", () => {
+test("normalizeDoc refuses version 2 and version 5, fills a v3 doc and gives it the version 4 fields", () => {
   assert.throws(() => core.normalizeDoc({ version: 2 }), core.VersionError);
-  assert.throws(() => core.normalizeDoc({ version: 4 }), core.VersionError);
+  assert.throws(() => core.normalizeDoc({ version: 5 }), core.VersionError);
+  assert.equal(core.normalizeDoc({ version: 4 }).version, 4);
   assert.throws(() => core.normalizeDoc({}), core.VersionError);
   assert.throws(() => core.normalizeDoc({ version: null }), /unreadable/);
   const d = core.normalizeDoc({ version: 3, plan: { tasks: [{ id: "a", name: "Alpha", estimate_min: 5 }] }, done: [{ id: "x", name: "Beta", estimate_min: 5, actual_min: 4 }] });
+  assert.equal(d.version, 4);
+  assert.equal(d.plan.tasks[0].deadline_time, null);
+  assert.deepEqual([d.folder_notes, d.progress], [{}, []]);
   assert.equal(d.plan.tasks[0].spent_s, 0);
   assert.equal(d.plan.tasks[0].updated_at, core.EPOCH);
   assert.equal(d.done[0].finished_at, "");
   assert.equal(d.planner.tz, "America/Chicago");
   assert.deepEqual(d.planner.windows.sat, ["10:00-12:30"]);
-  assert.throws(() => core.mergeDocs({ version: 4 }, core.emptyDoc()), core.VersionError);
+  assert.throws(() => core.mergeDocs({ version: 5 }, core.emptyDoc()), core.VersionError);
 });
 
 test("finishTask keeps the task id; a repeat goes through completeRepeat", () => {
-  const t = { id: "t1", name: "Alpha", estimate_min: 25, details: "d", spent_s: 0, deadline: "2026-10-16", target: null, folder: "P", repeat: null, last_done: null };
+  const t = { id: "t1", name: "Alpha", estimate_min: 25, details: "d", spent_s: 0, deadline: "2026-10-16", target: null, folder: "P", repeat: null, last_done: null, deadline_time: "17:00" };
   const d = core.finishTask(t, "2026-10-13T09:05:03.123000", 20);
-  assert.deepEqual(d, { id: "t1", name: "Alpha", estimate_min: 25, actual_min: 20, finished_at: "2026-10-13 09:05", details: "d", deadline: "2026-10-16", target: null, folder: "P", updated_at: core.EPOCH });
+  assert.deepEqual(d, { id: "t1", name: "Alpha", estimate_min: 25, actual_min: 20, finished_at: "2026-10-13 09:05", details: "d", deadline: "2026-10-16", target: null, folder: "P", updated_at: core.EPOCH, deadline_time: "17:00" });
   const r = { id: "abc123", name: "Walk", estimate_min: 10, details: "", spent_s: 30, deadline: null, target: null, folder: null, repeat: { kind: "daily" }, last_done: null };
   const rd = core.finishTask(r, "2026-10-13T18:30:00.000000", 9);
   assert.equal(rd.id, "36f9ef0a84fa50cbadd10f0e940173ff");

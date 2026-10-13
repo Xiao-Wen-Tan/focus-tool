@@ -1,5 +1,5 @@
 {
-  "description": "is_active(task, day): non-repeating -> true. Otherwise the rule matches the day and last_done != day. 'every': (day - anchor) in days >= 0 and divisible by every.",
+  "description": "is_active(task, day): non-repeating -> true. Otherwise the rule matches the day and last_done != day. 'every': (day - anchor) in days >= 0 and divisible by every. A repeating task with a deadline is active only on days up to and including the deadline; a deadline that is not a real YYYY-MM-DD day is ignored. next_cases: next_active_day(task, after), null when the next match would be after the deadline. expired_cases: expired_repeats(tasks, today), the ids of repeating tasks whose deadline is before today, in list order.",
   "cases": [
     {
       "description": "not repeating: always active",
@@ -298,6 +298,441 @@
       },
       "day": "2026-10-12",
       "expected": false
+    },
+    {
+      "description": "daily with a deadline: active on the deadline day",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-16",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-16",
+      "expected": true
+    },
+    {
+      "description": "daily with a deadline: active the day before",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-16",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-15",
+      "expected": true
+    },
+    {
+      "description": "daily with a deadline: inactive the day after",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-16",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": false
+    },
+    {
+      "description": "chosen days with a deadline: a matching day after the deadline is inactive",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-14",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "days",
+          "days": [
+            "mon",
+            "thu"
+          ]
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-15",
+      "expected": false
+    },
+    {
+      "description": "a deadline that is not a real day is ignored",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-02-30",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": true
+    },
+    {
+      "description": "a deadline that is not a date at all is ignored",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "soon",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "day": "2026-10-17",
+      "expected": true
+    }
+  ],
+  "next_cases": [
+    {
+      "description": "not repeating: null",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": null,
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-12",
+      "expected": null
+    },
+    {
+      "description": "daily, no deadline: the next day",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": null,
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-12",
+      "expected": "2026-10-13"
+    },
+    {
+      "description": "daily with a deadline: the deadline day itself",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-16",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-15",
+      "expected": "2026-10-16"
+    },
+    {
+      "description": "daily with a deadline: nothing after the deadline",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-16",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-16",
+      "expected": null
+    },
+    {
+      "description": "every 3 days with a deadline: next match before the deadline",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-17",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 3,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-12",
+      "expected": "2026-10-15"
+    },
+    {
+      "description": "every 3 days with a deadline: next match would be after the deadline",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-17",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 3,
+          "anchor": "2026-10-12"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-15",
+      "expected": null
+    },
+    {
+      "description": "every 3 days, done on the deadline day: null",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-15",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "every",
+          "every": 3,
+          "anchor": "2026-10-12"
+        },
+        "last_done": "2026-10-15",
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-14",
+      "expected": null
+    },
+    {
+      "description": "chosen days with a deadline: next chosen day is past the deadline",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-10-14",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "days",
+          "days": [
+            "mon",
+            "thu"
+          ]
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-12",
+      "expected": null
+    },
+    {
+      "description": "a deadline that is not a real day is ignored",
+      "task": {
+        "id": "a",
+        "name": "A",
+        "estimate_min": 10,
+        "details": "",
+        "spent_s": 0.0,
+        "deadline": "2026-13-01",
+        "target": null,
+        "folder": null,
+        "repeat": {
+          "kind": "daily"
+        },
+        "last_done": null,
+        "updated_at": "1970-01-01T00:00:00.000Z"
+      },
+      "after": "2026-10-12",
+      "expected": "2026-10-13"
+    }
+  ],
+  "expired_cases": [
+    {
+      "description": "only repeating tasks whose deadline is before today; malformed deadlines never expire",
+      "tasks": [
+        {
+          "id": "r1",
+          "name": "R1",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-11",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r2",
+          "name": "R2",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-12",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "plain",
+          "name": "PLAIN",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-01",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r4",
+          "name": "R4",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r5",
+          "name": "R5",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-02-30",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r6",
+          "name": "R6",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "not a date",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r7",
+          "name": "R7",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2025-01-31",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "weekdays"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "today": "2026-10-12",
+      "expected": [
+        "r1",
+        "r7"
+      ]
+    },
+    {
+      "description": "empty list",
+      "tasks": [],
+      "today": "2026-10-12",
+      "expected": []
     }
   ]
 }

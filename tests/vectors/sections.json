@@ -174,6 +174,218 @@
           "q"
         ]
       }
+    },
+    {
+      "description": "a repeating task with a deadline is dated and sorts by its deadline; a repeat without one stays ranked",
+      "tasks": [
+        {
+          "id": "plain",
+          "name": "PLAIN",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "rd",
+          "name": "RD",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-15",
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "early",
+          "name": "EARLY",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-14",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "r",
+          "name": "R",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": {
+            "kind": "daily"
+          },
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "late",
+          "name": "LATE",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": "2026-10-20",
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "same",
+          "name": "SAME",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-15",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "expected": {
+        "dated": [
+          "early",
+          "rd",
+          "same",
+          "late"
+        ],
+        "ranked": [
+          "plain",
+          "r"
+        ]
+      }
+    },
+    {
+      "description": "same date: deadlines first, an earlier deadline time first, no time (or a time that is not real) counts as the end of the day; a task whose target is its earliest date sorts as a deadline task at day end",
+      "tasks": [
+        {
+          "id": "noon_none",
+          "name": "noon_none",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "late",
+          "name": "late",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-16",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "five",
+          "name": "five",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-16",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": "17:00"
+        },
+        {
+          "id": "nine",
+          "name": "nine",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-16",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": "09:00"
+        },
+        {
+          "id": "aim",
+          "name": "aim",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": null,
+          "target": "2026-10-16",
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "both",
+          "name": "both",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-18",
+          "target": "2026-10-16",
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": "08:00"
+        },
+        {
+          "id": "bad",
+          "name": "bad",
+          "estimate_min": 10,
+          "details": "",
+          "spent_s": 0.0,
+          "deadline": "2026-10-16",
+          "target": null,
+          "folder": null,
+          "repeat": null,
+          "last_done": null,
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": "9am"
+        }
+      ],
+      "expected": {
+        "dated": [
+          "nine",
+          "five",
+          "late",
+          "both",
+          "bad",
+          "aim"
+        ],
+        "ranked": [
+          "noon_none"
+        ]
+      }
     }
   ]
 }

@@ -18,6 +18,7 @@
   --danger: #C2554A;
   --ok: #3E8F78;
   --warn: #B36B2C;
+  --due: #B5523B; /* a hard deadline, as on the desktop */
   --k-urgent: #F5A07A;
   --k-dated: #FFC29B;
   --k-ranked: #8FD9C4;
@@ -47,6 +48,7 @@
     --danger: #F08A7E;
     --ok: #7FD3BB;
     --warn: #F2B27A;
+    --due: #F08A7E;
     --k-urgent: #C97456;
     --k-dated: #B98457;
     --k-ranked: #4E9C88;
@@ -237,6 +239,15 @@ textarea.input { resize: vertical; min-height: 96px; }
 .row-main:active:not(.static) { background: var(--track); }
 .row-label { overflow-wrap: anywhere; }
 .row-sub { color: var(--dim); font-size: 14px; overflow-wrap: anywhere; }
+.row.due .row-label { color: var(--due); }
+.input.time { width: auto; flex: 0 0 auto; }
+.input.time[hidden] { display: none; }
+.notes > summary { cursor: pointer; list-style: none; }
+.notes > summary::before { content: "▸ "; }
+.notes[open] > summary::before { content: "▾ "; }
+.notes .notes-text { margin: 8px 0; min-height: 96px; }
+.notes .field-row { margin-bottom: 8px; }
+.notes-entry { white-space: pre-wrap; }
 .row-tools { display: flex; gap: 4px; flex: none; }
 .row.asleep .row-label { color: var(--dim); }
 .row.on-timer .row-label { font-weight: 650; }
@@ -286,7 +297,7 @@ textarea.input { resize: vertical; min-height: 96px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field-label { font-size: 14px; color: var(--dim); }
 .field-row { display: flex; align-items: center; gap: 8px; }
-.field-row[hidden], .dates[hidden], .hint[hidden] { display: none; }
+.field[hidden], .field-row[hidden], .dates[hidden], .hint[hidden] { display: none; }
 .dates { display: flex; flex-direction: column; gap: 10px; }
 .repeat-extra:empty { display: none; }
 

@@ -5,7 +5,7 @@
 // Dates are plain "YYYY-MM-DD" strings. "Naive" times are local wall-clock times in the
 // planner's time zone written without a zone, like Python's datetime.isoformat().
 
-export const STATE_VERSION = 3;
+export const STATE_VERSION = 4; // 4 adds deadline times and folder notes; 3 still loads
 export const EPOCH = "1970-01-01T00:00:00.000Z";
 export const NS = "212d6585-c191-5e24-9304-4a619852c6c3"; // same fixed namespace as focus_core.NS
 export const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -20,9 +20,12 @@ export const DEFAULT_PLANNER = Object.freeze({
   updated_at: EPOCH,
 });
 
-const TASK_FIELDS = ["name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done"];
-const TASK_DEFAULTS = { details: "", spent_s: 0, deadline: null, target: null, folder: null, repeat: null, last_done: null };
-const DONE_FIELDS = ["name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder"];
+const TASK_FIELDS = ["name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done",
+  "deadline_time"];
+const TASK_DEFAULTS = { details: "", spent_s: 0, deadline: null, target: null, folder: null, repeat: null, last_done: null,
+  deadline_time: null };
+const DONE_FIELDS = ["name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder",
+  "deadline_time"];
 
 export class VersionError extends Error {
   constructor(version) {
@@ -258,12 +261,26 @@ function fillDone(x) {
   return out;
 }
 
-/** An empty version 3 document. */
+function fillNotes(x) {
+  const out = {};
+  if (!x || typeof x !== "object" || Array.isArray(x)) return out;
+  for (const [path, v] of Object.entries(x)) {
+    if (v && typeof v === "object") out[path] = { text: v.text || "", updated_at: v.updated_at || EPOCH };
+  }
+  return out;
+}
+
+function fillProgress(x) {
+  const folder = x.folder ?? null, at = x.at || "", text = x.text || "";
+  return { id: x.id || uuid5Hex(NS, `note:${folder ?? ""}#${at}#${text}`), folder, at, text, updated_at: x.updated_at || EPOCH };
+}
+
+/** An empty version 4 document. */
 export function emptyDoc() {
   return normalizeDoc({ version: STATE_VERSION });
 }
 
-/** A complete version 3 document with every missing field filled in (a new copy).
+/** A complete version 4 document with every missing field filled in (a new copy). Version 3 also loads.
  * Unlike Python's migrate_doc, older versions are refused: the desktop updates them. */
 export function normalizeDoc(d) {
   if (!d || typeof d !== "object") throw new Error("The list file is not a JSON object.");
@@ -271,7 +288,7 @@ export function normalizeDoc(d) {
   if (d.version === null || typeof d.version === "boolean" || !Number.isFinite(version)) {
     throw new Error(`The list file has an unreadable version (${d.version}).`);
   }
-  if (Math.trunc(version) !== STATE_VERSION) throw new VersionError(Math.trunc(version));
+  if (Math.trunc(version) !== STATE_VERSION && Math.trunc(version) !== 3) throw new VersionError(Math.trunc(version));
   const timer = Object.assign(defaultTimer(), clone(d.timer || {}));
   timer.updated_at = timer.updated_at || EPOCH;
   const planner = d.planner ? clone(d.planner) : clone(DEFAULT_PLANNER);
@@ -288,6 +305,8 @@ export function normalizeDoc(d) {
     deleted: { ...(d.deleted || {}) },
     planner,
     geometry: d.geometry === undefined ? null : clone(d.geometry),
+    folder_notes: fillNotes(d.folder_notes),
+    progress: (Array.isArray(d.progress) ? d.progress : []).filter((x) => x && typeof x === "object").map(fillProgress),
   };
 }
 
@@ -353,6 +372,13 @@ export function mergeDocs(a0, b0) {
   folders.push(...[...used].sort());
   const ids = tasks.map((t) => t.id);
   const ci = timer.task_id != null ? ids.indexOf(timer.task_id) : -1;
+  const blank = { text: "", updated_at: EPOCH };
+  const notes = {};
+  for (const p of [...new Set([...Object.keys(a.folder_notes), ...Object.keys(b.folder_notes)])].sort()) {
+    notes[p] = clone(newer(a.folder_notes[p] || blank, b.folder_notes[p] || blank));
+  }
+  const progress = [...unionById(a.progress, b.progress).entries()].filter(([i]) => !(i in deleted)).map(([, x]) => x)
+    .sort((x, y) => cmpTuple([x.at, x.id], [y.at, y.id]));
   return {
     version: STATE_VERSION,
     plan: { tasks: clone(tasks) },
@@ -365,6 +391,8 @@ export function mergeDocs(a0, b0) {
     deleted,
     planner,
     geometry: null,
+    folder_notes: notes,
+    progress: clone(progress),
   };
 }
 
@@ -407,12 +435,33 @@ export function stampChanges(prev, cur0, now) {
   if (!deepEqual(without(cur.timer, ignored), without(p.timer, ignored))) cur.timer.updated_at = now;
   if (!deepEqual(without(cur.planner, ["updated_at"]), without(p.planner, ["updated_at"]))) cur.planner.updated_at = now;
   if (!deepEqual(cur.folders, p.folders)) cur.folders_updated_at = now;
+  for (const [path, old] of Object.entries(p.folder_notes)) {
+    if (!(path in cur.folder_notes)) cur.folder_notes[path] = { text: "", updated_at: old.updated_at };
+  }
+  for (const [path, n] of Object.entries(cur.folder_notes)) {
+    if (n.text !== (p.folder_notes[path] ? p.folder_notes[path].text : "")) n.updated_at = now;
+  }
+  const prevNotes = new Map(p.progress.map((x) => [x.id, x]));
+  for (const x of cur.progress) {
+    const old = prevNotes.get(x.id);
+    if (!old || ["folder", "at", "text"].some((k) => x[k] !== old[k])) x.updated_at = now;
+  }
+  const curNotes = new Set(cur.progress.map((x) => x.id));
+  for (const i of prevNotes.keys()) if (!curNotes.has(i)) cur.deleted[i] = now;
   const cutoff = isoMinusDays(now, TOMBSTONE_DAYS);
   cur.deleted = Object.fromEntries(Object.entries(cur.deleted).filter(([, v]) => v >= cutoff));
   return cur;
 }
 
 // ---------------------------------------------------------------- dated and ranked sections
+
+/** An "HH:MM" (24-hour) text as minutes after midnight, or null when missing or not a real time
+ * (like focus_core.parse_hm). */
+export function parseHm(s) {
+  if (typeof s !== "string" || !/^\d{2}:\d{2}$/.test(s)) return null;
+  const hh = Number(s.slice(0, 2)), mm = Number(s.slice(3));
+  return hh < 24 && mm < 60 ? hh * 60 + mm : null;
+}
 
 export function isDated(t) {
   return Boolean(t.deadline || t.target);
@@ -425,10 +474,15 @@ export function taskDate(t) {
 }
 
 /** [dated, ranked]. Dated: earliest date first, a deadline before a target-only task on the same
- * date, then list order. Ranked: every other task (repeats too) in list order. */
+ * date, an earlier deadline time first (no time counts as day end), then list order. A repeating task with a deadline is dated like any other. Ranked: every other
+ * task (repeats without a deadline too) in list order. */
 export function displaySections(tasks) {
   const dated = tasks.map((t, i) => [t, i]).filter(([t]) => isDated(t))
-    .map(([t, i]) => [[taskDate(t), t.deadline ? 0 : 1, i], t])
+    .map(([t, i]) => {
+      const first = taskDate(t);
+      const hm = first === t.deadline ? parseHm(t.deadline_time) : null;
+      return [[first, t.deadline ? 0 : 1, hm == null ? 1440 : hm, i], t];
+    })
     .sort((x, y) => cmpTuple(x[0], y[0])).map((x) => x[1]);
   return [dated, tasks.filter((t) => !isDated(t))];
 }
@@ -460,6 +514,14 @@ export function nextBlock(dayPlan, nowNaive, liveIds) {
 
 // ---------------------------------------------------------------- repeating tasks
 
+/** `s` if it is a real "YYYY-MM-DD" day, else null (never throws). Same rule as focus_core._parse_day. */
+function parseDay(s) {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s) || s.startsWith("0000")) return null;
+  const ms = Date.parse(`${s}T00:00:00Z`);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 10) === s ? s : null;
+}
+
 function ruleMatches(rule, day) {
   const kind = rule.kind;
   if (kind === "daily") return true;
@@ -473,27 +535,42 @@ function ruleMatches(rule, day) {
 }
 
 /** A repeating task is active on days its rule matches, unless it was already done that day.
+ * A repeating task with a deadline repeats up to and including that day, and is never active after it.
  * A task that does not repeat is always active. */
 export function isActive(task, day) {
   if (!task.repeat) return true;
+  const end = parseDay(task.deadline);
+  if (end !== null && day > end) return false;
   return ruleMatches(task.repeat, day) && task.last_done !== day;
 }
 
-/** The first day after `after` on which a repeating task is active; null for other tasks. */
+/** The first day after `after` on which a repeating task is active; null for other tasks, and null when
+ * that day would come after the task's deadline. */
 export function nextActiveDay(task, after) {
   if (!task.repeat) return null;
+  const end = parseDay(task.deadline);
   const rule = task.repeat;
   if (rule.kind === "every") {
     const step = Math.max(1, Math.trunc(Number(rule.every || 1)));
     const gap = daysBetween(rule.anchor, addDays(after, 1));
-    const d = gap <= 0 ? rule.anchor : addDays(rule.anchor, Math.ceil(gap / step) * step);
-    return isActive(task, d) ? d : addDays(d, step);
+    let d = gap <= 0 ? rule.anchor : addDays(rule.anchor, Math.ceil(gap / step) * step);
+    if (!isActive(task, d)) d = addDays(d, step);
+    return end !== null && d > end ? null : d;
   }
   for (let n = 1; n < 16; n++) {
     const d = addDays(after, n);
     if (isActive(task, d)) return d;
   }
   return null;
+}
+
+/** The repeating tasks whose deadline is before `today`. They are finished with and should leave the list.
+ * A deadline that is not a real "YYYY-MM-DD" day counts as no deadline, so that task is never expired. */
+export function expiredRepeats(tasks, today) {
+  return tasks.filter((t) => {
+    const end = t.repeat ? parseDay(t.deadline) : null;
+    return end !== null && end < today;
+  });
 }
 
 /** Done on a repeating task: the done entry for that day, and the task goes to sleep (mutates task).
@@ -503,7 +580,7 @@ export function completeRepeat(task, nowNaive, actualMin) {
   const rec = {
     id: uuid5Hex(NS, `rep:${task.id}#${day}`), name: task.name, estimate_min: task.estimate_min,
     actual_min: Math.trunc(actualMin), finished_at: `${day} ${nowNaive.slice(11, 16)}`, details: task.details || "",
-    deadline: null, target: null, folder: task.folder ?? null, updated_at: EPOCH,
+    deadline: null, target: null, folder: task.folder ?? null, updated_at: EPOCH, deadline_time: null,
   };
   task.last_done = day;
   task.spent_s = 0;
@@ -519,6 +596,7 @@ export function finishTask(task, nowNaive, actualMin) {
     id: task.id, name: task.name, estimate_min: task.estimate_min, actual_min: Math.trunc(actualMin),
     finished_at: `${nowNaive.slice(0, 10)} ${nowNaive.slice(11, 16)}`, details: task.details || "",
     deadline: task.deadline ?? null, target: task.target ?? null, folder: task.folder ?? null, updated_at: EPOCH,
+    deadline_time: task.deadline_time ?? null,
   };
 }
 
@@ -552,9 +630,20 @@ export function renameFolder(doc, old, neu) {
   const move = (p) => (under(p, old) ? neu + p.slice(old.length) : p);
   doc.folders = completeParents(doc.folders.map(move));
   for (const t of [...doc.plan.tasks, ...doc.done]) t.folder = move(t.folder ?? null);
+  // The folder's notes move with it (like focus_core.rename_folder).
+  const notes = doc.folder_notes || (doc.folder_notes = {});
+  for (const p of Object.keys(notes).filter((x) => under(x, old)).sort()) {
+    const text = notes[p].text;
+    if (!text) continue;
+    const to = notes[move(p)] || (notes[move(p)] = { text: "", updated_at: EPOCH });
+    to.text = to.text.trim() ? `${to.text}\n\n${text}` : text;
+    notes[p].text = "";
+  }
+  for (const x of doc.progress || []) x.folder = move(x.folder ?? null);
 }
 
-/** Remove folder `path` and its subfolders; their tasks stay on the list without a folder (mutates doc). */
+/** Remove folder `path` and its subfolders; their tasks stay on the list without a folder (mutates doc).
+ * Its notes are kept, and show again if a folder with the same name is made later. */
 export function deleteFolder(doc, path) {
   doc.folders = doc.folders.filter((p) => !under(p, path));
   for (const t of doc.plan.tasks) if (under(t.folder, path)) t.folder = null;

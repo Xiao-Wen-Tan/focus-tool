@@ -207,7 +207,7 @@
   },
   "now": "2026-10-12T15:00:00.000Z",
   "expected": {
-    "version": 3,
+    "version": 4,
     "plan": {
       "tasks": [
         {
@@ -221,7 +221,8 @@
           "folder": null,
           "repeat": null,
           "last_done": null,
-          "updated_at": "1970-01-01T00:00:00.000Z"
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": null
         },
         {
           "id": "t2",
@@ -234,7 +235,8 @@
           "folder": null,
           "repeat": null,
           "last_done": null,
-          "updated_at": "1970-01-01T00:00:00.000Z"
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": null
         },
         {
           "id": "t3",
@@ -247,7 +249,8 @@
           "folder": null,
           "repeat": null,
           "last_done": null,
-          "updated_at": "1970-01-01T00:00:00.000Z"
+          "updated_at": "1970-01-01T00:00:00.000Z",
+          "deadline_time": null
         }
       ]
     },
@@ -307,6 +310,8 @@
       },
       "updated_at": "1970-01-01T00:00:00.000Z"
     },
-    "geometry": null
+    "geometry": null,
+    "folder_notes": {},
+    "progress": []
   }
 }

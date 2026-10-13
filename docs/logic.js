@@ -3,9 +3,9 @@
 // The rules mirror the desktop panel in focus_tool.py: start, pause, Done, +5, Put back, reorder.
 import {
   EPOCH, WEEKDAY_KEYS, newId, clone, zonedParts, displaySections, reorderRanked, isActive, isDated,
-  nextActiveDay, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
+  nextActiveDay, expiredRepeats, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
   timerResume, timerAddMinutes, timerSkip, roundHalfEven, addFolder, weekday, taskDate, deepEqual,
-  emptyDoc, normalizeDoc, VersionError, STATE_VERSION,
+  emptyDoc, normalizeDoc, VersionError, STATE_VERSION, parseHm,
 } from "./core.js";
 
 export const TIME_PRESETS = [5, 10, 15, 25, 30, 45, 60, 90];
@@ -58,15 +58,54 @@ export function taskLabel(t) {
   return `${t.estimate_min}m · ${t.name}${used}`;
 }
 
-/** The full row text: timer mark, repeat mark, date prefix, then taskLabel. */
+/** A deadline time for people to read: "17:00" -> "5:00pm" (like focus_core.fmt_hm); "" when not a time. */
+export function fmtHm(s) {
+  const m = parseHm(s);
+  if (m == null) return "";
+  const hh = Math.floor(m / 60), mm = m % 60;
+  return `${hh % 12 || 12}:${String(mm).padStart(2, "0")}${hh < 12 ? "am" : "pm"}`;
+}
+
+/** How a task's dates show, like due_text in focus_tool.py: "📅 Due Fri 10/16 5:00pm" for a hard deadline,
+ * "🎯 Aim Mon 10/19" for an aim-to-finish date, both when it has both. "" for no dates. */
+export function dueText(t) {
+  let due = "";
+  if (t.deadline) {
+    const hm = fmtHm(t.deadline_time);
+    due = `📅 Due ${dateLabel(t.deadline)}${hm ? ` ${hm}` : ""}`;
+  }
+  if (t.target) return due ? `${due}, 🎯 aim ${dateLabel(t.target)}` : `🎯 Aim ${dateLabel(t.target)}`;
+  return due;
+}
+
+/** The full row text: timer mark, repeat mark, date prefix, then taskLabel. A repeating task's deadline is
+ * the last day it repeats, so it keeps the plain 📅 day. */
 export function rowLabel(doc, t) {
   let pre = "";
   const tm = doc.timer;
   if (tm && tm.running && tm.task_id === t.id) pre += tm.paused ? "⏸ " : "▶ ";
   else if (t.spent_s) pre += "⏸ ";
   if (t.repeat) pre += "🔁 ";
-  if (isDated(t)) pre += `📅 ${dateLabel(taskDate(t))} · `;
+  if (t.repeat && isDated(t)) pre += `📅 ${dateLabel(taskDate(t))} · `;
+  else if (isDated(t)) pre += `${dueText(t)} · `;
   return pre + taskLabel(t);
+}
+
+/** The words for a plan block's date: "📅 Due Fri 10/16 5:00pm" or "🎯 Aim Mon 10/19"; "" for none. */
+export function blockDateText(b) {
+  if (!b || !b.date) return "";
+  if (b.date_kind === "deadline") {
+    const hm = fmtHm(b.time);
+    return `📅 Due ${dateLabel(b.date)}${hm ? ` ${hm}` : ""}`;
+  }
+  return b.date_kind === "target" ? `🎯 Aim ${dateLabel(b.date)}` : "";
+}
+
+/** A time typed by hand as "HH:MM", or null for empty text. The phone's time box already gives "HH:MM";
+ * anything else that is not a real time also gives null. */
+export function cleanTime(text) {
+  const t = String(text || "").trim();
+  return parseHm(t) == null ? null : t;
 }
 
 export function repeatLabel(rule) {
@@ -121,7 +160,7 @@ export function upNext(doc, dayPlan, now) {
 function blankTask() {
   return {
     id: newId(), name: "", estimate_min: DEFAULT_MINUTES, details: "", spent_s: 0, deadline: null, target: null,
-    folder: null, repeat: null, last_done: null, updated_at: EPOCH,
+    folder: null, repeat: null, last_done: null, updated_at: EPOCH, deadline_time: null,
   };
 }
 
@@ -132,10 +171,9 @@ function cleanFields(f) {
   if (f.details !== undefined) out.details = String(f.details);
   for (const k of ["deadline", "target", "folder"]) if (f[k] !== undefined) out[k] = f[k] || null;
   if (f.repeat !== undefined) out.repeat = f.repeat ? clone(f.repeat) : null;
-  if (out.repeat) {
-    out.deadline = null; // a repeating task has no dates (contract section 1)
-    out.target = null;
-  }
+  if (f.deadline_time !== undefined) out.deadline_time = cleanTime(f.deadline_time);
+  // A repeating task may keep a deadline, the last day it repeats (contract section 1). It never has a target.
+  if (out.repeat) out.target = null;
   return out;
 }
 
@@ -144,6 +182,7 @@ export function addTask(doc, fields) {
   const f = cleanFields(fields);
   if (!f.name) return null;
   const t = Object.assign(blankTask(), f);
+  if (!t.deadline || t.repeat) t.deadline_time = null; // the time belongs to a hard deadline only
   doc.plan.tasks.unshift(t);
   if (t.folder && !doc.folders.includes(t.folder)) addFolder(doc, t.folder);
   return t;
@@ -156,6 +195,7 @@ export function updateTask(doc, id, fields) {
   if (f.name === "") delete f.name;
   if (f.repeat && t.repeat && t.repeat.kind !== f.repeat.kind) t.last_done = null;
   Object.assign(t, f);
+  if (!t.deadline || t.repeat) t.deadline_time = null; // the time belongs to a hard deadline only
   if (t.folder && !doc.folders.includes(t.folder)) addFolder(doc, t.folder);
   const tm = doc.timer;
   if (tm.running && tm.task_id === t.id) {
@@ -232,6 +272,15 @@ export function removeTask(doc, id) {
   const before = doc.plan.tasks.length;
   doc.plan.tasks = doc.plan.tasks.filter((t) => t.id !== id);
   return doc.plan.tasks.length !== before;
+}
+
+/** Remove every repeating task whose deadline has passed (it repeated until that day). Uses removeTask,
+ * so the next save records each one as deleted and other devices drop it too. Returns the removed ids,
+ * or false when there was nothing to remove (so the app does not save an unchanged list). */
+export function removeExpiredRepeats(doc, today) {
+  const ids = expiredRepeats(doc.plan.tasks, today).map((t) => t.id);
+  for (const id of ids) removeTask(doc, id);
+  return ids.length ? ids : false;
 }
 
 /** Put a finished task back at the FRONT of the list, with a new id. */
@@ -446,14 +495,61 @@ export function mayAutoSync(authPaused, force) {
  * so a change made on another device meanwhile (say a rename) is not undone by Save. */
 export function changedFields(original, form) {
   const out = {};
-  for (const k of ["name", "estimate_min", "details", "deadline", "target", "folder", "repeat"]) {
+  for (const k of ["name", "estimate_min", "details", "deadline", "target", "folder", "repeat", "deadline_time"]) {
     const a = original[k] === undefined ? null : original[k];
     const b = form[k] === undefined ? null : form[k];
     if (!deepEqual(a, b)) out[k] = b;
   }
-  if (out.repeat) {
-    out.deadline = null; // choosing a repeat removes the dates
-    out.target = null;
-  }
+  if (out.repeat) out.target = null; // choosing a repeat removes the "aim to finish by" date, not the deadline
   return out;
+}
+
+// ---------------------------------------------------------------- folder notes
+
+/** The summary text of folder `path` ("" when it has none). */
+export function folderNotesText(doc, path) {
+  const n = (doc.folder_notes || {})[path];
+  return n ? n.text : "";
+}
+
+/** Set the summary text of folder `path`. Returns false when nothing changed (so commit skips it). */
+export function setFolderNotes(doc, path, text) {
+  if (!path) return false;
+  const notes = doc.folder_notes || (doc.folder_notes = {});
+  const have = notes[path];
+  if ((have ? have.text : "") === text) return false;
+  if (have) have.text = text;
+  else notes[path] = { text, updated_at: EPOCH };
+  return true;
+}
+
+/** The progress notes of folder `path`, newest first. */
+export function progressFor(doc, path) {
+  return (doc.progress || []).filter((x) => x.folder === path)
+    .sort((a, b) => (a.at === b.at ? (a.id < b.id ? 1 : -1) : a.at < b.at ? 1 : -1));
+}
+
+/** Add a progress note to folder `path`, dated `now` (localNow). Returns it, or null for empty text. */
+export function addProgress(doc, path, text, now) {
+  const t = String(text || "").trim();
+  if (!t || !path) return null;
+  const x = { id: newId(), folder: path, at: `${now.day} ${now.hhmm}`, text: t, updated_at: EPOCH };
+  (doc.progress || (doc.progress = [])).push(x);
+  return x;
+}
+
+/** Change a progress note's text. Returns false when there is nothing to change. */
+export function editProgress(doc, id, text) {
+  const x = (doc.progress || []).find((n) => n.id === id);
+  const t = String(text || "").trim();
+  if (!x || !t || t === x.text) return false;
+  x.text = t;
+  return true;
+}
+
+/** Delete a progress note (the save leaves a tombstone so other devices drop it too). */
+export function deleteProgress(doc, id) {
+  const before = (doc.progress || []).length;
+  doc.progress = (doc.progress || []).filter((n) => n.id !== id);
+  return doc.progress.length !== before;
 }

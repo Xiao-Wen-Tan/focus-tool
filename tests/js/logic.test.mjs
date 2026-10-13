@@ -14,15 +14,18 @@ test("the page module links (all imports exist) and does nothing without a DOM",
   assert.ok(m._app);
 });
 
-test("addTask puts the new task at the front; repeat clears dates; folder is registered", () => {
+test("addTask puts the new task at the front; repeat keeps the deadline but clears the target; folder is registered", () => {
   const d = doc([task("a", "Alpha")]);
   const t = L.addTask(d, { name: "  Write intro ", estimate_min: 25, folder: "Puzzle/Tiles", deadline: "2026-10-16" });
   assert.deepEqual(names(d), ["Write intro", "Alpha"]);
   assert.equal(t.estimate_min, 25);
   assert.deepEqual(d.folders, ["Puzzle/Tiles", "Puzzle"]);
   const r = L.addTask(d, { name: "Walk", repeat: { kind: "daily" }, deadline: "2026-10-16", target: "2026-10-15" });
-  assert.equal(r.deadline, null);
+  assert.equal(r.deadline, "2026-10-16");
   assert.equal(r.target, null);
+  const u = L.updateTask(d, "a", { repeat: { kind: "weekdays" }, deadline: "2026-11-02", target: "2026-10-30" });
+  assert.equal(u.deadline, "2026-11-02");
+  assert.equal(u.target, null);
   assert.equal(L.addTask(d, { name: "   " }), null);
 });
 
@@ -145,9 +148,35 @@ test("labels: minutes, mm:ss, dates", () => {
   assert.equal(L.mins(600), "10 min");
   assert.equal(L.mins(100 * 60), "1h 40m");
   assert.equal(L.dateLabel("2026-10-16"), "Fri 10/16");
-  assert.equal(L.rowLabel(doc([]), { name: "Alpha", estimate_min: 45, spent_s: 0, deadline: null, target: "2026-10-16", repeat: null }), "📅 Fri 10/16 · 45m · Alpha");
+  assert.equal(L.rowLabel(doc([]), { name: "Alpha", estimate_min: 45, spent_s: 0, deadline: null, target: "2026-10-16", repeat: null }), "🎯 Aim Fri 10/16 · 45m · Alpha");
+  assert.equal(L.rowLabel(doc([]), { name: "Grant", estimate_min: 30, spent_s: 0, deadline: "2026-10-16", deadline_time: "17:00", target: null, repeat: null }), "📅 Due Fri 10/16 5:00pm · 30m · Grant");
+  assert.equal(L.rowLabel(doc([]), { name: "Both", estimate_min: 10, spent_s: 0, deadline: "2026-10-16", target: "2026-10-14", repeat: null }), "📅 Due Fri 10/16, 🎯 aim Wed 10/14 · 10m · Both");
   assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 30, deadline: null, target: null, repeat: { kind: "daily" } }), "⏸ 🔁 10m · Walk   (under 1 min used)");
   assert.equal(L.repeatLabel({ kind: "days", days: ["mon", "thu"] }), "Mon, Thu");
+  assert.equal(L.rowLabel(doc([]), { name: "Walk", estimate_min: 10, spent_s: 0, deadline: "2026-10-16", target: null, repeat: { kind: "daily" } }), "🔁 📅 Fri 10/16 · 10m · Walk");
+});
+
+test("removeExpiredRepeats drops repeats past their deadline, and the save records them as deleted", () => {
+  const d = doc([
+    task("old", "Old walk", { repeat: { kind: "daily" }, deadline: "2026-10-12" }),
+    task("today", "Walk today", { repeat: { kind: "daily" }, deadline: "2026-10-13" }),
+    task("plain", "Plain", { deadline: "2026-10-01" }),
+    task("bad", "Bad date", { repeat: { kind: "daily" }, deadline: "2026-02-30" }),
+  ]);
+  const prev = core.clone(d);
+  assert.deepEqual(L.removeExpiredRepeats(d, "2026-10-13"), ["old"]);
+  assert.deepEqual(names(d), ["Walk today", "Plain", "Bad date"]);
+  assert.equal(L.removeExpiredRepeats(d, "2026-10-13"), false);
+  const saved = core.stampChanges(prev, d, "2026-10-13T12:00:00.000Z");
+  assert.equal(saved.deleted.old, "2026-10-13T12:00:00.000Z");
+});
+
+test("an expired repeat on the timer is removed and the timer stops", () => {
+  const d = doc([task("w", "Walk", { repeat: { kind: "daily" }, deadline: "2026-10-12" })]);
+  assert.ok(L.startTask(d, "w", at("2026-10-12T09:00:00.000000")));
+  L.removeExpiredRepeats(d, "2026-10-13");
+  assert.equal(d.timer.running, false);
+  assert.deepEqual(names(d), []);
 });
 
 test("upNext prefers the plan's block for now, else the first active task in display order", () => {
@@ -201,7 +230,7 @@ test("?api= accepts only a local test server", () => {
 });
 
 test("a newer list kept on the phone is blocked and backed up, never replaced", () => {
-  const text = JSON.stringify({ version: 4, plan: { tasks: [{ id: "a", name: "Alpha" }] } });
+  const text = JSON.stringify({ version: 5, plan: { tasks: [{ id: "a", name: "Alpha" }] } });
   const r = L.readLocalDoc(text);
   assert.match(r.block, /newer Focus Tool/);
   assert.deepEqual(r.backup, { key: "focus.doc.backup-newer", text });
@@ -235,7 +264,10 @@ test("editor Save sends only the fields the user changed", () => {
   const opened = { name: "Alpha", estimate_min: 25, details: "", deadline: null, target: null, folder: null, repeat: null };
   assert.deepEqual(L.changedFields(opened, { ...opened }), {});
   assert.deepEqual(L.changedFields(opened, { ...opened, estimate_min: 45 }), { estimate_min: 45 });
-  assert.deepEqual(L.changedFields(opened, { ...opened, repeat: { kind: "daily" } }), { repeat: { kind: "daily" }, deadline: null, target: null });
+  assert.deepEqual(L.changedFields(opened, { ...opened, repeat: { kind: "daily" } }), { repeat: { kind: "daily" }, target: null });
+  // Choosing a repeat keeps a deadline the user set; it becomes the last day the task repeats.
+  assert.deepEqual(L.changedFields(opened, { ...opened, repeat: { kind: "daily" }, deadline: "2026-10-30" }),
+    { deadline: "2026-10-30", repeat: { kind: "daily" }, target: null });
   // A rename made on another device while the sheet was open survives a Save that changed only minutes.
   const d = doc([task("a", "Alpha", { estimate_min: 25 })]);
   L.findTask(d, "a").name = "Alpha renamed on desktop";
@@ -258,4 +290,59 @@ test("after GitHub rejects the token, automatic syncs pause until the token is c
   assert.equal(L.authPauseAfterSave(true, "tok-1", " tok-1 "), true);
   assert.equal(L.authPauseAfterSave(true, "tok-1", "tok-2"), false);
   assert.equal(L.authPauseAfterSave(false, "tok-1", "tok-1"), false);
+});
+
+test("deadline time: shown as 5:00pm, kept only on a hard deadline of a task that does not repeat", () => {
+  assert.deepEqual(["00:05", "09:30", "12:00", "17:00", "bad", null].map(L.fmtHm), ["12:05am", "9:30am", "12:00pm", "5:00pm", "", ""]);
+  const d = doc([task("a", "Alpha")]);
+  const t = L.addTask(d, { name: "Grant", deadline: "2026-10-16", deadline_time: "17:00" });
+  assert.equal(t.deadline_time, "17:00");
+  assert.equal(L.addTask(d, { name: "Paper", target: "2026-10-16", deadline_time: "17:00" }).deadline_time, null);
+  assert.equal(L.addTask(d, { name: "Odd", deadline: "2026-10-16", deadline_time: "5 pm" }).deadline_time, null);
+  L.updateTask(d, t.id, { deadline: null });
+  assert.equal(t.deadline_time, null); // no deadline, no time
+  L.updateTask(d, t.id, { deadline: "2026-10-16", deadline_time: "09:00" });
+  L.updateTask(d, t.id, { repeat: { kind: "daily" } });
+  assert.equal(t.deadline, "2026-10-16");
+  assert.equal(t.deadline_time, null); // a repeating task's deadline is only the last day it repeats
+  assert.deepEqual(L.changedFields({ deadline: "2026-10-16", deadline_time: null }, { deadline: "2026-10-16", deadline_time: "17:00" }), { deadline_time: "17:00" });
+});
+
+test("plan blocks name their date: due with a time, or aim", () => {
+  assert.equal(L.blockDateText({ date: "2026-10-16", date_kind: "deadline", time: "17:00" }), "📅 Due Fri 10/16 5:00pm");
+  assert.equal(L.blockDateText({ date: "2026-10-16", date_kind: "deadline", time: null }), "📅 Due Fri 10/16");
+  assert.equal(L.blockDateText({ date: "2026-10-19", date_kind: "target" }), "🎯 Aim Mon 10/19");
+  assert.equal(L.blockDateText({ date: null, date_kind: null }), "");
+});
+
+test("folder notes: summary, and progress notes added, edited, deleted; the save stamps and tombstones them", () => {
+  const d = doc([task("a", "Alpha", { folder: "Grant" })], { folders: ["Grant"] });
+  assert.equal(L.folderNotesText(d, "Grant"), "");
+  assert.equal(L.setFolderNotes(d, "Grant", "Waiting on letters"), true);
+  assert.equal(L.setFolderNotes(d, "Grant", "Waiting on letters"), false); // no change, nothing to save
+  const n1 = L.addProgress(d, "Grant", " Budget sent ", at("2026-10-12T09:00:00.000000"));
+  const n2 = L.addProgress(d, "Grant", "Letters asked for", at("2026-10-13T10:30:00.000000"));
+  assert.equal(L.addProgress(d, "Grant", "  ", at("2026-10-13T10:30:00.000000")), null);
+  assert.equal(n1.text, "Budget sent");
+  assert.deepEqual(L.progressFor(d, "Grant").map((x) => x.at), ["2026-10-13 10:30", "2026-10-12 09:00"]); // newest first
+  const saved = core.stampChanges(doc([]), d, "2026-10-13T15:00:00.000Z");
+  assert.equal(saved.folder_notes.Grant.updated_at, "2026-10-13T15:00:00.000Z");
+  assert.ok(saved.progress.every((x) => x.updated_at === "2026-10-13T15:00:00.000Z"));
+  const next = core.clone(saved);
+  assert.equal(L.editProgress(next, n1.id, "Budget sent to Sam"), true);
+  assert.equal(L.deleteProgress(next, n2.id), true);
+  const again = core.stampChanges(saved, next, "2026-10-13T16:00:00.000Z");
+  assert.deepEqual(again.progress.map((x) => [x.text, x.updated_at]), [["Budget sent to Sam", "2026-10-13T16:00:00.000Z"]]);
+  assert.equal(again.deleted[n2.id], "2026-10-13T16:00:00.000Z");
+});
+
+test("renaming a folder moves its notes; deleting it keeps them", () => {
+  const d = doc([], { folders: ["Grant", "Grant/Budget"], folder_notes: { Grant: { text: "Summary", updated_at: core.EPOCH } },
+    progress: [{ id: "n1", folder: "Grant/Budget", at: "2026-10-12 09:00", text: "Sent", updated_at: core.EPOCH }] });
+  core.renameFolder(d, "Grant", "NSF grant");
+  assert.equal(d.folder_notes["NSF grant"].text, "Summary");
+  assert.equal(d.folder_notes.Grant.text, "");
+  assert.equal(d.progress[0].folder, "NSF grant/Budget");
+  core.deleteFolder(d, "NSF grant");
+  assert.equal(d.folder_notes["NSF grant"].text, "Summary");
 });

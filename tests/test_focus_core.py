@@ -339,7 +339,7 @@ def test_migrate_gives_deterministic_ids_and_distinct_ids_for_duplicate_names():
     assert ids[0] == uuid.uuid5(fc.NS, "task:Alpha#0").hex
     assert ids[2] == uuid.uuid5(fc.NS, "task:Alpha#1").hex
     assert d1["done"][0]["id"] == uuid.uuid5(fc.NS, "done:Gamma#2026-10-01 09:00").hex
-    assert d1["version"] == 3 and d1["folders"] == [] and d1["deleted"] == {}
+    assert d1["version"] == 4 and d1["folders"] == [] and d1["deleted"] == {}
     assert d1["planner"] == fc.DEFAULT_PLANNER and d1["planner"] is not fc.DEFAULT_PLANNER
     assert d1["order_updated_at"] == fc.EPOCH and d1["plan"]["tasks"][1]["updated_at"] == fc.EPOCH
     assert d1["plan"]["tasks"][1]["deadline"] is None and d1["plan"]["tasks"][1]["spent_s"] == 30.0
@@ -360,12 +360,12 @@ def test_migrate_v1_without_done_list():
     d["version"] = 1
     del d["done"]
     doc = fc.migrate_doc(d)
-    assert doc["version"] == 3 and doc["done"] == []
+    assert doc["version"] == 4 and doc["done"] == []
 
 
-def test_version_above_3_is_rejected():
+def test_version_above_4_is_rejected():
     d = fc.migrate_doc(_v2_doc())
-    d["version"] = 4
+    d["version"] = 5
     with pytest.raises(ValueError):
         fc.doc_to_state(d)
     with pytest.raises(ValueError):
@@ -380,7 +380,7 @@ def test_v2_file_loads_and_saves_as_v3_round_trip(tmp_path):
     assert st.timer.task_id == st.plan.tasks[2].id
     text = fc.save_state_obj(tmp_path / "out.json", st)
     doc = json.loads(text)
-    assert doc["version"] == 3
+    assert doc["version"] == 4
     assert fc.state_to_doc(fc.doc_to_state(doc)) == doc
 
 
@@ -402,7 +402,7 @@ def test_v3_round_trip_keeps_every_field(tmp_path):
     assert back.timer.task_id == t.id and back.timer.updated_at == "2026-10-12T10:00:01.000Z"
     assert back.done[0].folder == "Puzzle" and back.deleted == {"abc": "2026-10-12T09:00:00.000Z"}
     assert back.planner == fc.DEFAULT_PLANNER
-    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 3
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 4
 
 
 def test_old_timer_dict_without_new_fields_loads():
@@ -574,7 +574,7 @@ def test_migrate_tool_writes_v3_and_never_overwrites(tmp_path):
 
 def test_load_state_raises_for_a_newer_version_instead_of_returning_an_empty_state(tmp_path):
     d = fc.migrate_doc(_v2_doc())
-    d["version"] = 4
+    d["version"] = 5
     p = tmp_path / "s.json"
     p.write_text(json.dumps(d), encoding="utf-8")
     with pytest.raises(fc.NewerVersionError):
@@ -623,3 +623,72 @@ def test_bad_version_raises_value_error(bad):
         fc.merge_docs(d, good)
     with pytest.raises(ValueError):
         fc.stamp_changes(good, d, "2026-10-12T15:00:00.000Z")
+
+
+# ---------- deadline time of day ----------
+
+@pytest.mark.parametrize("text, minutes", [("17:00", 1020), ("00:00", 0), ("23:59", 1439), ("24:00", None),
+                                           ("9:00", None), ("12:60", None), (None, None), ("", None)])
+def test_parse_hm(text, minutes):
+    assert fc.parse_hm(text) == minutes
+
+
+def test_deadline_time_survives_save_finish_and_put_back(tmp_path):
+    t = fc.Task("Report", 30, deadline="2026-10-16", deadline_time="17:00")
+    st = fc.State(fc.Plan([t]), 0, fc.TimerState())
+    path = tmp_path / "state.json"
+    fc.save_state_obj(path, st)
+    back = fc.load_state(path).plan.tasks[0]
+    assert (back.deadline, back.deadline_time) == ("2026-10-16", "17:00")
+    done = fc.finish_task(back, datetime(2026, 10, 15, 9, 0), 25)
+    assert done.deadline_time == "17:00"
+    assert fc.done_to_task(done).deadline_time == "17:00"
+
+
+# ---------- folder notes ----------
+
+def _notes_state():
+    st = fc.State(fc.Plan([fc.Task("Draft", 30, folder="Grant")]), 0, fc.TimerState(), folders=["Grant", "Grant/Budget"])
+    st.folder_notes = {"Grant": {"text": "Waiting on letters", "updated_at": fc.EPOCH},
+                       "Grant/Budget": {"text": "Sent to Sam", "updated_at": fc.EPOCH}}
+    st.progress = [{"id": "n1", "folder": "Grant/Budget", "at": "2026-10-12 09:00", "text": "First draft",
+                    "updated_at": fc.EPOCH}]
+    return st
+
+
+def test_notes_survive_a_save_and_load(tmp_path):
+    path = tmp_path / "state.json"
+    fc.save_state_obj(path, _notes_state())
+    back = fc.load_state(path)
+    assert back.folder_notes["Grant"]["text"] == "Waiting on letters"
+    assert back.progress[0]["text"] == "First draft"
+
+
+def test_rename_folder_moves_its_notes_and_progress():
+    st = _notes_state()
+    fc.rename_folder(st, "Grant", "NSF grant")
+    assert st.folder_notes["NSF grant"]["text"] == "Waiting on letters"
+    assert st.folder_notes["NSF grant/Budget"]["text"] == "Sent to Sam"
+    assert st.folder_notes["Grant"]["text"] == "" and st.folder_notes["Grant/Budget"]["text"] == ""
+    assert st.progress[0]["folder"] == "NSF grant/Budget"
+
+
+def test_rename_onto_a_folder_with_notes_keeps_both_texts():
+    st = _notes_state()
+    st.folder_notes["Other"] = {"text": "Old notes", "updated_at": fc.EPOCH}
+    fc.rename_folder(st, "Grant/Budget", "Other")
+    assert st.folder_notes["Other"]["text"] == "Old notes\n\nSent to Sam"
+
+
+def test_delete_folder_keeps_its_notes():
+    st = _notes_state()
+    fc.delete_folder(st, "Grant")
+    assert st.folders == []
+    assert st.folder_notes["Grant"]["text"] == "Waiting on letters"
+    assert st.progress[0]["folder"] == "Grant/Budget"
+
+
+def test_merge_states_keeps_the_shared_notes():
+    shared = _notes_state()
+    out = fc.merge_states(shared, fc.State(fc.Plan(), 0, fc.TimerState()))
+    assert out.folder_notes == shared.folder_notes and out.progress == shared.progress

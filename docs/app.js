@@ -8,12 +8,13 @@ import { GitHubStore, SyncEngine, fetchDayPlan } from "./store.js";
 import {
   TIME_PRESETS, DEFAULT_MINUTES, ADD_MINUTES_STEP, CELEBRATE_MS, localNow, findTask, timerTask, mmss, mins,
   dateLabel, rowLabel, repeatLabel, sleepText, mascot, upNext, addTask, updateTask, startTask, toggleRun,
-  addMinutes, finishTaskNow, removeTask, putBack, clearDone, moveRanked, moveRankedToTop, setWindows,
+  addMinutes, finishTaskNow, removeTask, removeExpiredRepeats, putBack, clearDone, moveRanked, moveRankedToTop, setWindows,
   windowsText, timelineSegments, minToHm, stampToLocalHm, parseApiOverride, readLocalDoc, replanBlockMessage,
-  syncPauseUntil, changedFields, authPauseAfterSync, authPauseAfterSave, mayAutoSync,
+  syncPauseUntil, changedFields, authPauseAfterSync, authPauseAfterSave, mayAutoSync, blockDateText,
+  folderNotesText, setFolderNotes, progressFor, addProgress, editProgress, deleteProgress,
 } from "./logic.js";
 
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.2.0";
 const KEY_DOC = "focus.doc";
 const KEY_SETTINGS = "focus.settings";
 const KEY_UI = "focus.ui";
@@ -70,7 +71,9 @@ const app = {
   asking: false, // "time is up" message showing
   planBusy: "",
   planNote: "", // why the last Re-plan now did not ask GitHub
+  lastDay: null, // the day the list was last checked for repeating tasks past their deadline
   api: null,
+  notesDraft: null, // {path, text}: folder notes being typed, saved when the box loses focus
 };
 
 function blockedText() {
@@ -129,6 +132,15 @@ function commit(fn) {
   scheduleSync(EDIT_SYNC_MS);
   render();
   return result;
+}
+
+/** Remove repeating tasks whose deadline has passed, the same way Delete does, so other devices drop them
+ * too. Runs when the app opens, when the day changes while it is open, and after each sync. */
+function dropExpiredRepeats() {
+  if (!app.doc || blockedText()) return;
+  const day = now().day;
+  app.lastDay = day;
+  commit((d) => removeExpiredRepeats(d, day));
 }
 
 function scheduleSync(ms) {
@@ -202,6 +214,7 @@ async function doSync() {
   }
   renderStatus();
   if (blockedText()) render();
+  if (r.status === "ok") dropExpiredRepeats();
   return r;
 }
 
@@ -327,7 +340,16 @@ function render() {
     content = card("Something went wrong", h("p", { class: "hint" }, String((ex && ex.message) || ex)));
     console.error(ex);
   }
+  const typing = document.activeElement && document.activeElement.classList.contains("notes-text")
+    ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   main.replaceChildren(h("div", { class: "status-wrap" }, h("p", { "data-status": "", class: "status" })), content);
+  if (typing) {
+    const box = main.querySelector(".notes-text");
+    if (box) {
+      box.focus();
+      box.setSelectionRange(typing[0], typing[1]);
+    }
+  }
   renderStatus();
 }
 
@@ -475,6 +497,7 @@ function doDone(id) {
 /** Once a second: move the disk and the clock, and notice when time is up. */
 function tick() {
   if (document.hidden) return;
+  if (now().day !== app.lastDay) dropExpiredRepeats();
   const doc = app.doc;
   if (doc && doc.timer.running) {
     // Show "time is up" when the countdown reaches zero while the app is open. Tracked in memory only,
@@ -514,9 +537,6 @@ function taskRow(t, { ranked, visibleIds, today }) {
   const sub = [];
   if (asleep) sub.push(sleepText(t, today));
   else if (t.repeat) sub.push(t.repeat.kind === "days" ? `Repeats on ${repeatLabel(t.repeat)}` : `Repeats ${repeatLabel(t.repeat).toLowerCase()}`);
-  if (t.deadline && t.target) sub.push(`Deadline ${dateLabel(t.deadline)}, aim ${dateLabel(t.target)}`);
-  else if (t.deadline) sub.push("Deadline");
-  else if (t.target) sub.push("Aim to finish");
   if (t.folder && app.ui.folder == null) sub.push(t.folder);
   if (t.details.trim()) sub.push(t.details.trim().split("\n")[0]);
   const main = h("button", { type: "button", class: "row-main", onclick: () => openEditor(t.id) },
@@ -527,7 +547,8 @@ function taskRow(t, { ranked, visibleIds, today }) {
     btn("↓", () => commit((d) => moveRanked(d, t.id, 1, visibleIds)), "icon", { "aria-label": `Move ${t.name} down` }),
     btn("⤒", () => commit((d) => moveRankedToTop(d, t.id)), "icon", { "aria-label": `Move ${t.name} to the top` }),
   ) : null;
-  return h("li", { class: `row${asleep ? " asleep" : ""}${app.doc.timer.running && app.doc.timer.task_id === t.id ? " on-timer" : ""}` }, main, tools);
+  const due = t.deadline && !t.repeat ? " due" : "";
+  return h("li", { class: `row${asleep ? " asleep" : ""}${due}${app.doc.timer.running && app.doc.timer.task_id === t.id ? " on-timer" : ""}` }, main, tools);
 }
 
 function viewList() {
@@ -545,6 +566,7 @@ function viewList() {
   } }, ...folderOptions(filter));
   const head = h("div", { class: "list-head" }, select, btn("+ Add", () => openEditor(null), "primary"));
   const out = h("div", { class: "list" }, head);
+  if (filter) out.append(notesCard(filter));
   if (shownDated.length) {
     out.append(card("📅 By date", h("ul", { class: "rows" }, shownDated.map((t) => taskRow(t, { ranked: false, today })))));
   }
@@ -553,6 +575,49 @@ function viewList() {
     ? h("ul", { class: "rows" }, shownRanked.map((t) => taskRow(t, { ranked: true, visibleIds, today })))
     : h("p", { class: "empty" }, filter ? "No tasks in this folder." : "No tasks yet. Tap + Add."), hint));
   return out;
+}
+
+/** The shown folder's notes: a summary that saves when you leave the box, and dated progress notes. */
+function notesCard(path) {
+  const doc = app.doc;
+  const draft = app.notesDraft && app.notesDraft.path === path ? app.notesDraft.text : null;
+  const text = h("textarea", { class: "input notes-text", rows: "4", placeholder: "Notes for this folder's project: where it stands, what comes next", "aria-label": `Notes for ${path}` });
+  text.value = draft ?? folderNotesText(doc, path);
+  text.addEventListener("input", () => { app.notesDraft = { path, text: text.value }; });
+  text.addEventListener("blur", () => {
+    const d = app.notesDraft;
+    if (!d || d.path !== path) return;
+    app.notesDraft = null;
+    if (d.text !== folderNotesText(app.doc, path)) commit((x) => setFolderNotes(x, path, d.text));
+  });
+  const add = h("input", { type: "text", class: "input", placeholder: "Add a progress note (it gets today's date)", enterkeyhint: "done", "aria-label": "New progress note" });
+  const doAdd = () => {
+    if (!add.value.trim()) return;
+    commit((x) => addProgress(x, path, add.value, now()));
+  };
+  add.addEventListener("keydown", (e) => { if (e.key === "Enter") doAdd(); });
+  const entries = progressFor(doc, path);
+  const log = entries.length ? h("ul", { class: "rows notes-log" }, entries.map((x) => h("li", { class: "row" },
+    h("div", { class: "row-main static" },
+      h("span", { class: "row-sub" }, dateLabel(x.at.slice(0, 10))),
+      h("span", { class: "row-label notes-entry" }, x.text)),
+    h("div", { class: "row-tools" },
+      btn("Edit", () => {
+        const t = window.prompt(`Edit the note from ${dateLabel(x.at.slice(0, 10))}:`, x.text);
+        if (t != null) commit((d) => editProgress(d, x.id, t));
+      }, "small quiet"),
+      btn("Delete", () => {
+        if (window.confirm("Delete this progress note on all devices?")) commit((d) => deleteProgress(d, x.id));
+      }, "small quiet"))))) : h("p", { class: "hint" }, "No progress notes yet.");
+  const open = app.ui.notesOpen !== false;
+  const box = h("details", { class: "card notes", open: open || null },
+    h("summary", { class: "card-title" }, `📝 Notes for ${path.split("/").pop()}${entries.length ? ` (${entries.length} progress)` : ""}`),
+    text, h("div", { class: "field-row" }, add, btn("Add", doAdd, "small")), log);
+  box.addEventListener("toggle", () => {
+    app.ui.notesOpen = box.open;
+    save(KEY_UI, app.ui);
+  });
+  return box;
 }
 
 // ---------------------------------------------------------------- the editor sheet
@@ -574,11 +639,11 @@ function openEditor(id) {
   const today = now().day;
   const t = existing ? clone(existing) : {
     name: "", estimate_min: DEFAULT_MINUTES, details: "", deadline: null, target: null,
-    folder: app.ui.folder || null, repeat: null,
+    folder: app.ui.folder || null, repeat: null, deadline_time: null,
   };
   const form = { ...t, repeat: t.repeat ? clone(t.repeat) : null };
   const opened = clone({ name: t.name, estimate_min: t.estimate_min, details: t.details, deadline: t.deadline,
-    target: t.target, folder: t.folder, repeat: t.repeat }); // to save only what the user changed
+    target: t.target, folder: t.folder, repeat: t.repeat, deadline_time: t.deadline_time ?? null }); // to save only what the user changed
 
   const name = h("input", { type: "text", class: "input", placeholder: "What is the task?", value: form.name, enterkeyhint: "done", "aria-label": "Task name" });
   name.addEventListener("input", () => { form.name = name.value; });
@@ -598,14 +663,24 @@ function openEditor(id) {
   details.addEventListener("input", () => { form.details = details.value; });
 
   // dates
-  const dateRow = (label, key) => {
-    const input = h("input", { type: "date", class: "input date", value: form[key] || "", "aria-label": label });
-    input.addEventListener("change", () => { form[key] = input.value || null; });
-    const clear = btn("Clear", () => { input.value = ""; form[key] = null; }, "quiet small");
-    return h("label", { class: "field" }, h("span", { class: "field-label" }, label), h("span", { class: "field-row" }, input, clear));
+  const timeInput = h("input", { type: "time", class: "input time", value: form.deadline_time || "", "aria-label": "Deadline time (optional)", title: "The time of day the deadline falls at. Leave it empty for the end of the day." });
+  timeInput.addEventListener("change", () => { form.deadline_time = timeInput.value || null; });
+  const drawTime = () => {
+    timeInput.hidden = !form.deadline || Boolean(form.repeat); // only a hard deadline has a time
+    if (timeInput.hidden) { timeInput.value = ""; form.deadline_time = null; }
   };
-  const dates = h("div", { class: "dates" }, dateRow("Deadline", "deadline"), dateRow("Aim to finish by", "target"));
-  const datesNote = h("p", { class: "hint" }, "Repeating tasks have no dates. They follow your order.");
+  const dateRow = (label, key, extra = null) => {
+    const input = h("input", { type: "date", class: "input date", value: form[key] || "", "aria-label": label });
+    input.addEventListener("change", () => { form[key] = input.value || null; drawTime(); });
+    const clear = () => { input.value = ""; form[key] = null; drawTime(); };
+    const row = h("label", { class: "field" }, h("span", { class: "field-label" }, label), h("span", { class: "field-row" }, input, extra, btn("Clear", clear, "quiet small")));
+    row._clear = clear;
+    return row;
+  };
+  const deadlineRow = dateRow("Deadline", "deadline", timeInput);
+  const targetRow = dateRow("Aim to finish by", "target");
+  const dates = h("div", { class: "dates" }, deadlineRow, targetRow);
+  const datesNote = h("p", { class: "hint" }, "A repeating task can have a deadline. It repeats until that day, then leaves the list. Without one it follows your order.");
 
   // folder
   const folderSel = h("select", { class: "input", "aria-label": "Folder" });
@@ -652,8 +727,9 @@ function openEditor(id) {
   const drawRepeat = () => {
     repeatExtra.replaceChildren();
     const r = form.repeat;
-    dates.hidden = Boolean(r);
+    targetRow.hidden = Boolean(r); // a repeating task keeps its deadline but never has an "aim to finish by" date
     datesNote.hidden = !r;
+    drawTime();
     if (r && r.kind === "days") {
       repeatExtra.append(h("div", { class: "pills", role: "group", "aria-label": "Days" }, WEEKDAY_KEYS.map((k, i) => {
         const on = (r.days || []).includes(k);
@@ -676,6 +752,7 @@ function openEditor(id) {
     else if (k === "days") form.repeat = { kind: "days", days: [WEEKDAY_KEYS[(new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7]] };
     else if (k === "every") form.repeat = { kind: "every", every: 2, anchor: today };
     else form.repeat = { kind: k };
+    if (form.repeat) targetRow._clear();
     drawRepeat();
   });
   drawRepeat();
@@ -686,7 +763,8 @@ function openEditor(id) {
   const collect = () => {
     const f = {
       name: form.name, estimate_min: form.estimate_min, details: form.details, folder: form.folder,
-      repeat: form.repeat, deadline: form.repeat ? null : form.deadline, target: form.repeat ? null : form.target,
+      repeat: form.repeat, deadline: form.deadline, target: form.repeat ? null : form.target,
+      deadline_time: form.deadline && !form.repeat ? form.deadline_time || null : null,
     };
     if (f.repeat && f.repeat.kind === "days" && !(f.repeat.days || []).length) {
       toast("Pick at least one day for the repeat.");
@@ -818,7 +896,7 @@ function viewPlan() {
       const tall = b.len * PX_PER_MIN >= 56;
       const tiny = b.len * PX_PER_MIN < 26;
       const label = `${b.start}-${b.end}  ${b.name}  (${b.minutes}m)`;
-      const extra = [KIND_LABEL[b.kind] || b.kind, b.date ? `${b.date_kind === "deadline" ? "due" : "aim"} ${dateLabel(b.date)}` : "", b.left_after_min ? `${b.left_after_min}m left after` : ""].filter(Boolean).join(" · ");
+      const extra = [KIND_LABEL[b.kind] || b.kind, blockDateText(b), b.left_after_min ? `${b.left_after_min}m left after` : ""].filter(Boolean).join(" · ");
       seg.append(h("button", {
         type: "button", class: `tl-block k-${b.kind}${ok ? "" : " gone"}${tall ? "" : " short"}${tiny ? " tiny" : ""}`,
         style: { top: `${b.top * PX_PER_MIN + 1}px`, height: `${Math.max(b.len * PX_PER_MIN - 2, 8)}px` },
@@ -1016,6 +1094,7 @@ function start() {
   app.doc = loadDoc();
   app.lastSaved = app.doc;
   makeEngine();
+  dropExpiredRepeats();
   render();
   setInterval(tick, 1000);
   setInterval(() => {

@@ -8,8 +8,12 @@ How a day is planned (contracts.md section 4):
 1. Work out the minutes left per task (estimate minus time already used) and skip tasks with none left.
 2. Urgent work. Dated tasks whose finish-by day (the date minus 2 working days) is already past go first.
 3. Hard pass. Deadline tasks are reserved as late as possible before their finish-by day.
+   A deadline with a time of day (deadline_time) is passed from that minute, and on the deadline day
+   itself the task only gets time before it.
 4. Soft pass. Tasks with a target date ("aim to finish by") are reserved the same way in what is left.
 5. Ranked pass. Undated tasks (and repeating tasks active that day) fill the plan day in list order.
+   A repeating task is always planned as a repeat, never as dated work. If it has a deadline, that is the
+   last day it repeats, so it gets its block only on days it is active up to and including the deadline.
 6. Ahead pass. Any free time left on the plan day pulls dated work forward from its latest reserved day.
 
 Command line, as used by the GitHub Actions job and for testing:
@@ -157,15 +161,19 @@ class _Calendar:
                         self.take_asap(d, mins)
         return self.free[d]
 
-    def total(self, d: date) -> int:
-        return sum(e - s for s, e in self.day(d))
+    def total(self, d: date, until: Optional[int] = None) -> int:
+        """Free minutes on day `d`, only those before minute `until` when it is given."""
+        end = 24 * 60 if until is None else until
+        return sum(max(0, min(e, end) - s) for s, e in self.day(d))
 
-    def take_asap(self, d: date, need: int) -> list:
-        """Take up to `need` minutes from the start of day `d`. Returns the [start, end] pieces taken."""
+    def take_asap(self, d: date, need: int, until: Optional[int] = None) -> list:
+        """Take up to `need` minutes from the start of day `d`, none after minute `until` when it is given.
+        Returns the [start, end] pieces taken."""
+        end = 24 * 60 if until is None else until
         got, ivs = [], self.day(d)
-        while need > 0 and ivs:
+        while need > 0 and ivs and ivs[0][0] < end:
             s, e = ivs[0]
-            n = min(need, e - s)
+            n = min(need, min(e, end) - s)
             got.append((s, s + n))
             need -= n
             if s + n >= e:
@@ -174,18 +182,27 @@ class _Calendar:
                 ivs[0][0] = s + n
         return got
 
-    def take_alap(self, d: date, need: int) -> list:
-        """Take up to `need` minutes from the end of day `d`."""
+    def take_alap(self, d: date, need: int, until: Optional[int] = None) -> list:
+        """Take up to `need` minutes from the end of day `d` (from minute `until` back, when it is given)."""
+        end = 24 * 60 if until is None else until
         got, ivs = [], self.day(d)
-        while need > 0 and ivs:
-            s, e = ivs[-1]
-            n = min(need, e - s)
-            got.append((e - n, e))
+        i = len(ivs) - 1
+        while need > 0 and i >= 0:
+            s, e = ivs[i]
+            top = min(e, end)
+            if top <= s:
+                i -= 1
+                continue
+            n = min(need, top - s)
+            got.append((top - n, top))
             need -= n
-            if e - n <= s:
-                ivs.pop()
+            if top < e:  # the part after `until` stays free
+                ivs.insert(i + 1, [top, e])
+            if top - n <= s:
+                ivs.pop(i)
             else:
-                ivs[-1][1] = e - n
+                ivs[i][1] = top - n
+            i -= 1
         return got
 
     def release(self, d: date, s: int, e: int) -> None:
@@ -199,10 +216,12 @@ class _Job:
 
     def __init__(self, task, index: int, minutes: int, buffer_days: int):
         self.task, self.index, self.minutes = task, index, minutes
-        self.deadline = date.fromisoformat(task.deadline) if task.deadline else None
-        self.target = date.fromisoformat(task.target) if task.target else None
+        # A repeating task's deadline only says when it stops repeating, so it is planned as undated work.
+        self.deadline = date.fromisoformat(task.deadline) if task.deadline and not task.repeat else None
+        self.target = date.fromisoformat(task.target) if task.target and not task.repeat else None
         if self.deadline and self.target and self.target > self.deadline:
             self.target = None  # a target later than the deadline adds nothing
+        self.cut = fc.parse_hm(task.deadline_time) if self.deadline else None  # minute the deadline falls at
         self.fb_dead = fc.finish_by(self.deadline, buffer_days) if self.deadline else None
         self.fb_tgt = fc.finish_by(self.target, buffer_days) if self.target else None
         self.slots = []  # one dict per slot with day, s, e, kind and date_kind
@@ -219,6 +238,10 @@ class _Job:
     def placed(self) -> int:
         return sum(x["e"] - x["s"] for x in self.slots)
 
+    def until(self, d: date) -> Optional[int]:
+        """The minute work must stop on day `d`: the deadline time on the deadline day, else None."""
+        return self.cut if d == self.deadline else None
+
     @property
     def main_kind(self) -> str:
         return "deadline" if self.deadline else "target"
@@ -233,7 +256,7 @@ def _place_alap(cal: _Calendar, job: _Job, need: int, last: date, kind: str, dat
     """Reserve up to `need` minutes as late as possible, from the end of `last` back to the plan day."""
     got, d = 0, last
     while got < need and d >= cal.plan_day:
-        got += job.add(d, cal.take_alap(d, need - got), kind, date_kind)
+        got += job.add(d, cal.take_alap(d, need - got, job.until(d)), kind, date_kind)
         d -= timedelta(days=1)
     return got
 
@@ -244,9 +267,16 @@ def _place_asap(cal: _Calendar, job: _Job, need: int, first: date, last: date, k
     got, d = 0, max(first, cal.plan_day)
     last = min(last, cal.last_day)
     while got < need and d <= last:
-        got += job.add(d, cal.take_asap(d, need - got), kind, date_kind)
+        got += job.add(d, cal.take_asap(d, need - got, job.until(d)), kind, date_kind)
         d += timedelta(days=1)
     return got
+
+
+def _fmt_when(job: _Job, d: date, kind: str) -> str:
+    """The day for a warning, with the deadline time when it has one: "Fri 10/16 5:00pm"."""
+    if kind == "deadline" and job.cut is not None:
+        return f"{_fmt_day(d)} {fc.fmt_hm(job.task.deadline_time)}"
+    return _fmt_day(d)
 
 
 def _warn(job: _Job, kind: str, message: str, minutes: Optional[int] = None) -> dict:
@@ -268,16 +298,15 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
 
     jobs = []
     for i, t in enumerate(state.plan.tasks):
-        if t.repeat and not t.deadline and not t.target:
-            if not fc.is_active(t, day):
-                continue  # asleep today
+        if t.repeat and not fc.is_active(t, day):
+            continue  # asleep today, or past its deadline
         m = remaining_minutes(t, timer, now_local)
         if m > 0:
             jobs.append(_Job(t, i, m, buffer_days))
     dated = [j for j in jobs if j.dated]
     ranked = [j for j in jobs if not j.dated]
     repeats = [(t, t.estimate_min) for t in state.plan.tasks
-               if t.repeat and not t.deadline and not t.target and t.estimate_min > 0]
+               if t.repeat and t.estimate_min > 0]
 
     cal = _Calendar(cfg, day, start_min, repeats)
     capacity = cal.total(day)
@@ -294,11 +323,13 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
     for j in urgent:
         _, when, k = j.trigger
         _place_asap(cal, j, j.minutes, day, cal.last_day, "urgent", k)
-        if when < day:
-            warnings.append(_warn(j, "overdue", f"its {k} {_fmt_day(when)} has passed"))
+        passed_today = (k == "deadline" and when == day and j.cut is not None and start_min is not None
+                        and start_min >= j.cut)
+        if when < day or passed_today:
+            warnings.append(_warn(j, "overdue", f"its {k} {_fmt_when(j, when, k)} has passed"))
         else:
             warnings.append(_warn(j, "in_buffer",
-                                  f"inside the {buffer_days} working days before its {k} {_fmt_day(when)}"))
+                                  f"inside the {buffer_days} working days before its {k} {_fmt_when(j, when, k)}"))
     rest = [j for j in dated if j not in urgent]
 
     # 3. Hard pass. Deadline tasks go latest finish-by day first, each as late as possible.
@@ -315,7 +346,8 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
             short = j.minutes - got - more
             if short > 0:
                 warnings.append(_warn(j, "deadline_missed",
-                                      f"needs {short} min more than fits before {_fmt_day(j.deadline)}", short))
+                                      f"needs {short} min more than fits before "
+                                      f"{_fmt_when(j, j.deadline, 'deadline')}", short))
 
     # 4. Soft pass. Target dates go latest finish-by day first. A task that also has a deadline gives its
     # deadline slots back first, so moving it earlier can only help; what does not fit before the target
@@ -344,18 +376,18 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
 
     # 6. Ahead pass. Free time left today pulls dated work forward from its latest reserved day.
     for j in sorted(dated, key=lambda j: (j.min_fb, j.deadline is None, j.index)):
-        while cal.total(day) > 0:
+        while cal.total(day, j.until(day)) > 0:
             future = [x for x in j.slots if x["day"] > day]
             if not future:
                 break
             latest = max(x["day"] for x in future)
             seg = min((x for x in future if x["day"] == latest), key=lambda x: x["s"])
-            n = min(seg["e"] - seg["s"], cal.total(day))
+            n = min(seg["e"] - seg["s"], cal.total(day, j.until(day)))
             cal.release(latest, seg["s"], seg["s"] + n)
             seg["s"] += n
             if seg["s"] >= seg["e"]:
                 j.slots.remove(seg)
-            j.add(day, cal.take_asap(day, n), "ahead", j.main_kind)
+            j.add(day, cal.take_asap(day, n, j.until(day)), "ahead", j.main_kind)
 
     # 7. Blocks for the plan day, merged when the same task runs on; outlook for later days.
     raw = []
@@ -377,13 +409,14 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
     blocks = []
     for s, e, j, kind, dk in merged:
         done_so_far[j.task.id] = done_so_far.get(j.task.id, 0) + (e - s)
-        date_text = None
+        date_text, time_text = None, None
         if dk == "deadline":
             date_text = j.task.deadline
+            time_text = j.task.deadline_time if j.cut is not None else None
         elif dk == "target":
             date_text = j.task.target
         blocks.append({"task_id": j.task.id, "name": j.task.name, "start": _hhmm(s), "end": _hhmm(e),
-                       "minutes": e - s, "kind": kind, "date": date_text, "date_kind": dk,
+                       "minutes": e - s, "kind": kind, "date": date_text, "date_kind": dk, "time": time_text,
                        "left_after_min": max(0, j.minutes - done_so_far[j.task.id]),
                        "repeat": bool(j.task.repeat)})
 

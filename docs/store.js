@@ -225,7 +225,7 @@ export class SyncEngine {
     } catch {
       throw new GitHubError(0, "state.json on GitHub is not valid JSON. Fix it on the desktop first.");
     }
-    const doc = normalizeDoc(parsed); // refuses versions other than 3 (VersionError) before anything is written
+    const doc = normalizeDoc(parsed); // refuses versions other than 3 and 4 (VersionError) before anything is written
     const changed = !this.cache.last_remote_doc || canonical(doc) !== canonical(this.cache.last_remote_doc);
     this.cache.etag = r.etag;
     this.cache.sha = r.sha;
