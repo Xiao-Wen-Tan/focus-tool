@@ -180,3 +180,136 @@ def test_staged_content_is_checked_even_if_disk_copy_is_cleaned_afterwards(
     assert "draft.txt" in result.stderr
     assert "Write intro" not in result.stdout
     assert "Write intro" not in result.stderr
+
+
+# ---------- --history: every blob and commit message reachable from any ref ----------
+
+@pytest.fixture
+def fake_state_with_folders(tmp_path: Path) -> Path:
+    state_path = tmp_path / "fake-state-folders.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "plan": {"tasks": [{"id": "a1", "name": "Alpha", "folder": "Garden/Seeds"}]},
+                "folders": ["Garden", "Garden/Seeds"],
+                "done": [{"id": "d1", "name": "Write intro"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return state_path
+
+
+def _commit_file(repo: Path, name: str, text: str, message: str) -> None:
+    (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", message)
+
+
+def test_history_clean_repo_passes(repo: Path, fake_state_with_folders: Path):
+    _commit_file(repo, "README.md", "Nothing sensitive here.\n", "first")
+
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_history_finds_a_task_name_in_a_deleted_file(repo: Path, fake_state_with_folders: Path):
+    _commit_file(repo, "notes.txt", "Remember to Write intro.\n", "add notes")
+    _git(repo, "rm", "-q", "notes.txt")
+    _git(repo, "commit", "-q", "-m", "remove notes")
+
+    # The working tree is clean now, so the normal check passes...
+    assert run_check(repo, fake_state_with_folders).returncode == 0
+    # ...but the name is still in the history.
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert "notes.txt" in result.stderr
+    assert "Write intro" not in result.stdout + result.stderr
+
+
+def test_history_finds_a_name_on_another_branch(repo: Path, fake_state_with_folders: Path):
+    _commit_file(repo, "README.md", "Hello.\n", "first")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _commit_file(repo, "side.txt", "Alpha is next.\n", "side work")
+    _git(repo, "checkout", "-q", "-")
+
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert "side.txt" in result.stderr
+    assert "Alpha" not in result.stdout + result.stderr
+
+
+def test_history_finds_a_folder_name(repo: Path, fake_state_with_folders: Path):
+    _commit_file(repo, "folders.txt", "Filed under Garden/Seeds.\n", "folders")
+
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert "folders.txt" in result.stderr
+    assert "Garden" not in result.stdout + result.stderr
+
+
+def test_history_finds_a_name_in_a_commit_message_and_prints_only_the_id(
+    repo: Path, fake_state_with_folders: Path
+):
+    _commit_file(repo, "README.md", "Hello.\n", "Finished Write intro today")
+    commit_id = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert commit_id in result.stderr
+    assert "Write intro" not in result.stdout + result.stderr
+    assert "Finished" not in result.stdout + result.stderr
+
+
+def test_history_flags_a_data_path_in_an_old_commit(repo: Path, fake_state_with_folders: Path):
+    (repo / "data").mkdir()
+    (repo / "data" / "state.json").write_text("{}", encoding="utf-8")
+    _git(repo, "add", "-f", "data/state.json")
+    _git(repo, "commit", "-q", "-m", "oops")
+    _git(repo, "rm", "-q", "--cached", "data/state.json")
+    _git(repo, "commit", "-q", "-m", "undo")
+
+    result = run_check(repo, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert "data/state.json" in result.stderr
+
+
+def test_history_works_with_a_separate_git_dir(tmp_path: Path, fake_state_with_folders: Path):
+    work = tmp_path / "work"
+    gitdir = tmp_path / "meta.git"
+    work.mkdir()
+    _git(work, "init", "-q", f"--separate-git-dir={gitdir}")
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "Test")
+    _commit_file(work, "notes.txt", "Write intro\n", "add")
+
+    result = run_check(work, fake_state_with_folders, "--history")
+
+    assert result.returncode == 1
+    assert "notes.txt" in result.stderr
+
+
+def test_install_hooks_copies_the_hook_into_the_git_hooks_dir(tmp_path: Path):
+    work = tmp_path / "work"
+    gitdir = tmp_path / "meta.git"
+    work.mkdir()
+    _git(work, "init", "-q", f"--separate-git-dir={gitdir}")
+    installer = SCRIPT.parent / "install_hooks.py"
+
+    result = subprocess.run(
+        [sys.executable, str(installer), "--repo-root", str(work)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    hook = gitdir / "hooks" / "pre-commit"
+    assert hook.exists()
+    assert "check_public.py" in hook.read_text(encoding="utf-8")

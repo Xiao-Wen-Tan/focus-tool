@@ -32,6 +32,9 @@ if ($node) {
 Write-Host "Checking the repo is safe to make public"
 & $py (Join-Path $here "tools\check_public.py") --repo-root $here
 if ($LASTEXITCODE -ne 0) { throw "check_public.py found files unsafe for the public repo; not building." }
+Write-Host "Checking the whole git history is safe to make public"
+& $py (Join-Path $here "tools\check_public.py") --history --repo-root $here
+if ($LASTEXITCODE -ne 0) { throw "check_public.py --history found task data in the git history; not building." }
 
 $work = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-work"
 $dist = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-dist"
@@ -39,7 +42,8 @@ $dist = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-dist"
     --icon (Join-Path $here "assets\icon.ico") `
     --add-data ((Join-Path $here "assets") + ";assets") `
     --add-data ((Join-Path $here "settings.default.json") + ";.") `
-    --collect-data tzdata `
+    --collect-all tzdata `
+    --hidden-import tzdata `
     --hidden-import win32cred `
     --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQml --exclude-module PySide6.Qt3DCore `

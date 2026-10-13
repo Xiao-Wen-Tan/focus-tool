@@ -2,10 +2,10 @@
 # Pre-commit hook: refuses the commit if any staged file would leak your real
 # task data into this PUBLIC repo. See tools/check_public.py for what it checks.
 #
-# To install, copy or symlink this file to .git/hooks/pre-commit and make it
-# executable, for example from the repo root:
-#   cp tools/pre-commit .git/hooks/pre-commit
-#   chmod +x .git/hooks/pre-commit
+# Install it once per computer, from the repo folder:
+#   python tools/install_hooks.py
+# That copies this file into the folder `git rev-parse --git-path hooks` names,
+# which works even though this repo keeps its git folder outside Box.
 
 repo_root=$(git rev-parse --show-toplevel) || exit 1
 
