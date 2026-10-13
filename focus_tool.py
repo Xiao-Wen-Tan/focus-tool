@@ -41,7 +41,7 @@ import winsound
 from datetime import date, datetime, timedelta, timezone
 from datetime import datetime as _real_datetime  # for parsing only; see the note below
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PySide6.QtCore import (QAbstractNativeEventFilter, QDate, QEasingCurve, QPoint, QPropertyAnimation, QRect,
                             QRectF, Qt, QTimer, Property, Signal)
@@ -585,7 +585,7 @@ def first_date(t: fc.Task) -> str | None:
 
 
 def clean_folder(text: str | None) -> str | None:
-    """A folder path typed by hand, tidied, so 'Paper / Theory/' becomes 'Paper/Theory'. Empty text gives None."""
+    """A folder path typed by hand, tidied, so 'Puzzle / Tiles/' becomes 'Puzzle/Tiles'. Empty text gives None."""
     parts = [p.strip() for p in (text or "").split("/") if p.strip()]
     return "/".join(parts) or None
 
@@ -2393,6 +2393,10 @@ class FocusWidget(QWidget):
         # PC is set to that zone (America/Chicago by default), as the user's computers are.
         try:
             plan = planner.plan_from_doc(self.build_doc(), local_to_utc(datetime.now(), tz), "now", by="desktop")
+        except ZoneInfoNotFoundError:  # the built .exe is missing the tzdata time zone files
+            self._set_sync_status(f"Re-plan failed because the time zone data for {tz} is missing. "
+                                  "Rebuild or reinstall Focus Tool.", alert=True)
+            return
         except Exception as ex:  # for example a date another device saved oddly
             self._set_sync_status(f"Re-plan failed ({_short(ex)})")
             return
@@ -2562,12 +2566,18 @@ class FocusWidget(QWidget):
             self.panel.refresh()
 
     def _log(self, rec: fc.BlockRecord):
-        new = not self.log_path.exists()
-        with self.log_path.open("a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if new:
-                w.writerow(["finished_at", "task", "estimate_min", "actual_min"])
-            w.writerow([rec.finished_at.isoformat(timespec="minutes"), rec.task, rec.estimate_min, rec.actual_min])
+        """Adds a row to log.csv. If the file is locked (say Excel has it open) the row is skipped, so the
+        task is still recorded as finished in Completed."""
+        try:
+            new = not self.log_path.exists()
+            with self.log_path.open("a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["finished_at", "task", "estimate_min", "actual_min"])
+                w.writerow([rec.finished_at.isoformat(timespec="minutes"), rec.task, rec.estimate_min,
+                            rec.actual_min])
+        except OSError:
+            pass
 
     def open_panel(self):
         self.panel.show()

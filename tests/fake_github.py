@@ -48,6 +48,7 @@ class FakeGitHub:
         self.dispatches = []  # list of {"workflow":..., "ref":..., "inputs":...}
         self._rate_limit = None  # None, or {"reset_at": epoch_seconds}
         self._oversized = {}  # path -> size, forced by force_oversized
+        self.private = True  # what GET /repos/{owner}/{repo} reports; tests set False for a public repo
         if seed_text is not None:
             self._put(seed_path, seed_text)
         handler = _make_handler(self)
@@ -147,7 +148,7 @@ def _make_handler(fake: FakeGitHub):
             if path == repo_path:
                 if not self._check_auth():
                     return
-                self._send_json(200, {"full_name": f"{fake.owner}/{fake.repo}"})
+                self._send_json(200, {"full_name": f"{fake.owner}/{fake.repo}", "private": fake.private})
                 return
             if path.startswith(contents_prefix):
                 if not self._check_auth():

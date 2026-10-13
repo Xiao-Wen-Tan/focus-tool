@@ -153,7 +153,7 @@ export class GitHubStore {
     let priv = "";
     try {
       const body = await res.json();
-      priv = body && body.private === false ? " Warning: this repository is public, so your list is visible to anyone." : "";
+      priv = body && body.private === false ? " This repository is public, so anyone can see your list." : "";
     } catch { /* ignore */ }
     return `Connected to ${this.owner}/${this.repo}.${priv}`;
   }

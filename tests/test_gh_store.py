@@ -128,6 +128,13 @@ def test_check_reports_auth_and_success(fake):
     assert good.check() == "Connected to me/focus-data."
 
 
+def test_check_warns_when_the_repo_is_public(fake):
+    fake.private = False
+    text = make_store(fake).check()
+    assert text.startswith("Connected to me/focus-data.")
+    assert "This repository is public, so anyone can see your list." in text
+
+
 # ---------- fetch/put day plan ----------
 
 def test_fetch_day_plan_none_when_missing(fake):

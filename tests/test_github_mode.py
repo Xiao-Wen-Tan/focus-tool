@@ -618,3 +618,31 @@ def test_a_newer_box_file_saved_during_github_mode_is_not_overwritten(env):
     assert a.sync_now().status == "ok"
     assert (env.box / "state.json").read_text(encoding="utf-8") == text
     assert "Beta" in remote_names(env.fake)
+
+
+# ---------- final review fixes ----------
+
+def test_replan_without_time_zone_data_says_so_instead_of_crashing(env, clock, monkeypatch):
+    import zoneinfo
+    import planner
+
+    def no_tz(*a, **k):
+        raise zoneinfo.ZoneInfoNotFoundError("No time zone found with key America/Chicago")
+
+    monkeypatch.setattr(planner, "plan_from_doc", no_tz)
+    a = env.computer("a", github=False)
+    add(a, "Alpha", 30)
+    a.replan_now()  # must not raise
+    assert "time zone" in a.sync_status.lower()
+    assert "reinstall" in a.sync_status.lower() or "rebuild" in a.sync_status.lower()
+
+
+def test_a_locked_log_does_not_stop_done(env, clock, tmp_path):
+    a = env.computer("a", github=False)
+    t = add(a, "Alpha", 30)
+    locked = tmp_path / "locked-log"
+    locked.mkdir()  # opening a folder as a file fails with an OSError, like a log another program holds
+    a.log_path = locked
+    a.done(t)
+    assert "Alpha" not in names(a)
+    assert [d.name for d in a.completed] == ["Alpha"]

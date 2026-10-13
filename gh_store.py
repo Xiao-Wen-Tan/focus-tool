@@ -239,7 +239,13 @@ class GitHubStore:
             return f"GitHub error: {e.message}"
         except Offline as e:
             return f"Could not reach GitHub: {e.message}"
-        return f"Connected to {self.owner}/{self.repo}."
+        warning = ""
+        try:
+            if json.loads(body.decode("utf-8")).get("private") is False:
+                warning = " This repository is public, so anyone can see your list."
+        except (ValueError, AttributeError):
+            pass  # no readable answer about privacy; say nothing rather than guess
+        return f"Connected to {self.owner}/{self.repo}.{warning}"
 
 
 # ---------------------------------------------------------------- sync
