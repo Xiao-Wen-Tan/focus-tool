@@ -1,0 +1,423 @@
+"""The desktop's GitHub sync mode, the day-plan card, Up next from the plan, and working hours.
+
+Run without a screen (Qt offscreen mode) against tests/fake_github.py on localhost, never the real network.
+gh_store's token functions are replaced, so the real Windows Credential Manager is never touched. Each
+"computer" gets its own %APPDATA% folder; all of them share one stand-in for the Box data folder.
+"""
+import json
+import os
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import pytest
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QApplication
+
+import focus_core as fc
+import gh_store
+from fake_github import start_fake
+
+T0 = datetime(2026, 10, 12, 9, 0)  # a Monday
+
+
+@pytest.fixture
+def fake():
+    f = start_fake(token="test-token", owner="me", repo="focus-data")
+    yield f
+    f.stop()
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch, fake):
+    QApplication.instance() or QApplication([])
+    import focus_tool as ft
+    box = tmp_path / "box" / "data"
+    monkeypatch.setenv("FOCUSTOOL_DATA", str(box))
+    monkeypatch.setattr(ft.FocusWidget, "AUTO_SYNC", False)
+    tokens = {"t": "test-token"}
+    monkeypatch.setattr(gh_store, "load_token", lambda: tokens["t"])
+    monkeypatch.setattr(gh_store, "save_token", lambda t: tokens.__setitem__("t", t))
+    monkeypatch.setattr(gh_store, "delete_token", lambda: tokens.__setitem__("t", None))
+
+    def engine(cfg):
+        store = gh_store.GitHubStore(cfg["owner"], cfg["repo"], cfg["token"], branch=cfg.get("branch", "main"),
+                                     api=fake.url, timeout=3)
+        return gh_store.SyncEngine(store, ft.local_dir() / "github-cache.json", sleep=lambda s: None)
+
+    monkeypatch.setattr(ft, "make_sync_engine", engine)
+    made = []
+
+    def computer(name, github=True):
+        appdata = tmp_path / name
+        monkeypatch.setenv("APPDATA", str(appdata))
+        local = appdata / "FocusTool"
+        local.mkdir(parents=True, exist_ok=True)
+        lj = local / "local.json"
+        if github and not lj.exists():
+            lj.write_text(json.dumps({"github": {"owner": "me", "repo": "focus-data", "branch": "main"}}),
+                          encoding="utf-8")
+        w = ft.FocusWidget(ft.load_settings())
+        made.append(w)
+        return w
+
+    yield SimpleNamespace(ft=ft, computer=computer, tokens=tokens, box=box, fake=fake, tmp=tmp_path)
+    for w in made:
+        w.stop_sync()
+        w.panel.close()
+        w.close()
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    import focus_tool as ft
+
+    class Clock:
+        t = T0
+
+        @classmethod
+        def now(cls):
+            return cls.t
+
+    monkeypatch.setattr(ft, "datetime", Clock)
+    return Clock
+
+
+def names(w):
+    return [t.name for t in w.plan.tasks]
+
+
+def remote(fake) -> dict:
+    return json.loads(fake.files["state.json"]["text"])
+
+
+def remote_names(fake):
+    return [t["name"] for t in remote(fake)["plan"]["tasks"]]
+
+
+def _texts(lst):
+    return [lst.item(i).text() for i in range(lst.count())]
+
+
+def add(w, name, minutes=10, **kw):
+    t = fc.Task(name, minutes, **kw)
+    w.plan.tasks.insert(0, t)
+    w.changed()
+    return t
+
+
+# ---------- GitHub mode ----------
+
+def test_two_computers_converge(env):
+    a, b = env.computer("a"), env.computer("b")
+    assert a.mode == "github" and b.mode == "github"
+    add(a, "Alpha")
+    assert a.sync_now().status == "ok"
+    assert remote_names(env.fake) == ["Alpha"]
+    b.sync_now()
+    assert names(b) == ["Alpha"]
+    assert a.sync_status.startswith("Synced ")
+
+
+def test_concurrent_edits_both_survive(env):
+    a, b = env.computer("a"), env.computer("b")
+    add(a, "Alpha")
+    a.sync_now()
+    b.sync_now()
+    a.plan.tasks[0].name = "Alpha 2"
+    a.changed()
+    add(b, "Beta")
+    a.sync_now()
+    b.sync_now()
+    a.sync_now()
+    assert sorted(names(a)) == sorted(names(b)) == ["Alpha 2", "Beta"]
+
+
+def test_a_delete_sticks(env):
+    a, b = env.computer("a"), env.computer("b")
+    add(a, "Beta")
+    add(a, "Alpha")
+    a.sync_now()
+    b.sync_now()
+    a.plan.tasks = [t for t in a.plan.tasks if t.name != "Alpha"]
+    a.changed()
+    a.sync_now()
+    b.sync_now()
+    b.sync_now()
+    a.sync_now()
+    assert names(a) == names(b) == ["Beta"] == remote_names(env.fake)
+
+
+def test_adopted_remote_data_is_not_stamped_as_a_local_edit(env):
+    a, b = env.computer("a"), env.computer("b")
+    add(a, "Alpha")
+    a.sync_now()
+    stamp = remote(env.fake)["plan"]["tasks"][0]["updated_at"]
+    b.sync_now()
+    add(b, "Beta")
+    b.sync_now()
+    alpha = next(t for t in remote(env.fake)["plan"]["tasks"] if t["name"] == "Alpha")
+    assert alpha["updated_at"] == stamp
+
+
+def test_box_mirror_is_written_but_not_read(env):
+    a = env.computer("a")
+    add(a, "Alpha")
+    a.sync_now()
+    assert [t.name for t in fc.load_state(env.box / "state.json").plan.tasks] == ["Alpha"]
+    fc.save_state_obj(env.box / "state.json", fc.State(fc.Plan([fc.Task("Intruder", 5)]), 0, fc.TimerState()))
+    a.check_shared()
+    a.sync_now()
+    assert names(a) == ["Alpha"] and remote_names(env.fake) == ["Alpha"]
+
+
+def test_first_github_start_imports_the_box_file_once(env):
+    env.box.mkdir(parents=True)
+    fc.save_state_obj(env.box / "state.json", fc.State(fc.Plan([fc.Task("Alpha", 10)]), 0, fc.TimerState()))
+    a = env.computer("a")
+    a.sync_now()
+    assert remote_names(env.fake) == ["Alpha"]
+    assert remote(env.fake)["order_updated_at"] != fc.EPOCH
+    local = json.loads((env.tmp / "a" / "FocusTool" / "local.json").read_text(encoding="utf-8"))
+    assert local["github_imported"] is True
+    fc.save_state_obj(env.box / "state.json",
+                      fc.State(fc.Plan([fc.Task("Alpha", 10), fc.Task("Gamma", 5)]), 0, fc.TimerState()))
+    a.stop_sync()
+    again = env.computer("a")
+    again.sync_now()
+    assert names(again) == ["Alpha"]
+
+
+def test_offline_edit_is_kept_and_pushed_later(env):
+    a = env.computer("a")
+    a.sync_now()
+    dead = start_fake()
+    dead_url = dead.url
+    dead.stop()
+    live_url = a._engine.store.api
+    a._engine.store.api = dead_url
+    add(a, "Alpha")
+    assert a.sync_now().status == "offline"
+    assert a.sync_status == "Offline, will retry"
+    assert "Alpha" not in json.dumps(remote(env.fake))
+    a.stop_sync()
+    again = env.computer("a")  # a restart while offline keeps the edit
+    assert names(again) == ["Alpha"]
+    again._engine.store.api = live_url
+    assert again.sync_now().status == "ok"
+    assert remote_names(env.fake) == ["Alpha"]
+
+
+def test_a_rejected_token_says_so(env):
+    env.tokens["t"] = "wrong-token"
+    a = env.computer("a")
+    assert a.sync_now().status == "auth"
+    assert a.sync_status == "GitHub token rejected"
+    a.panel.show()
+    assert a.panel.sync_label.text() == "GitHub token rejected"
+
+
+def test_rate_limit_says_when_it_retries(env, clock):
+    a = env.computer("a")
+    env.fake.set_rate_limit(reset_at=time.time() + 600)
+    assert a.sync_now().status == "rate_limited"
+    assert a.sync_status.startswith("GitHub busy, retrying at ")
+
+
+def test_background_thread_syncs(env, monkeypatch):
+    monkeypatch.setattr(env.ft.FocusWidget, "AUTO_SYNC", True)
+    a = env.computer("a")
+    add(a, "Alpha")
+    a.kick_sync()
+    end = time.monotonic() + 10
+    while time.monotonic() < end and not a.sync_status.startswith("Synced "):
+        time.sleep(0.05)
+        a.drain_sync_results()  # what on_tick does in the app
+    assert remote_names(env.fake) == ["Alpha"]
+    assert a.sync_status.startswith("Synced ")
+
+
+def test_github_dialog_saves_and_disconnect_returns_to_box_mode(env):
+    env.tokens["t"] = None
+    a = env.computer("a", github=False)
+    assert a.mode == "box"
+    dlg = env.ft.GitHubDialog(a)
+    dlg.owner.setText("me")
+    dlg.repo.setText("focus-data")
+    dlg.token.setText("test-token")
+    assert dlg.save()
+    assert a.mode == "github" and env.tokens["t"] == "test-token"
+    add(a, "Alpha")
+    a.sync_now()
+    assert remote_names(env.fake) == ["Alpha"]
+    a.disconnect_github()
+    assert a.mode == "box" and env.tokens["t"] is None
+    local = json.loads((env.tmp / "a" / "FocusTool" / "local.json").read_text(encoding="utf-8"))
+    assert "github" not in local
+    add(a, "Beta")
+    assert [t.name for t in fc.load_state(env.box / "state.json").plan.tasks] == ["Beta", "Alpha"]
+    assert remote_names(env.fake) == ["Alpha"]
+
+
+# ---------- day plan ----------
+
+def _plan(day, blocks, made="2026-10-12T00:07:00.000Z"):
+    return {"version": 1, "date": day, "mode": "now", "generated_at": made, "generated_by": "actions",
+            "tz": "America/Chicago", "start": "09:00", "capacity_min": 450, "free_min": 0, "blocks": blocks,
+            "outlook": [], "warnings": [{"task_id": "x", "name": "Alpha", "kind": "deadline_missed",
+                                         "message": "needs 30 min more than fits before Thu 10/15"}]}
+
+
+def _block(t, start, end, minutes):
+    return {"task_id": t.id, "name": t.name, "start": start, "end": end, "minutes": minutes, "kind": "ranked",
+            "date": None, "date_kind": None, "left_after_min": 0, "repeat": False}
+
+
+def _write_plan(env, plan):
+    env.box.mkdir(parents=True, exist_ok=True)
+    (env.box / "day-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+
+
+def test_replan_now_writes_the_plan_and_uploads_it(env, clock):
+    a = env.computer("a")
+    add(a, "Alpha", 30)
+    a.sync_now()
+    a.replan_now()
+    plan = json.loads((env.box / "day-plan.json").read_text(encoding="utf-8"))
+    assert plan["date"] == "2026-10-12" and plan["generated_by"] == "desktop"
+    assert [(b["name"], b["start"], b["end"]) for b in plan["blocks"]] == [("Alpha", "09:00", "09:30")]
+    a.sync_now()
+    assert json.loads(env.fake.files["day-plan.json"]["text"])["generated_at"] == plan["generated_at"]
+
+
+def test_github_mode_reads_the_plan_from_github_and_mirrors_it(env, clock):
+    a = env.computer("a")
+    alpha = add(a, "Alpha", 30)
+    env.fake._put("day-plan.json", json.dumps(_plan("2026-10-12", [_block(alpha, "09:00", "09:30", 30)])))
+    a.sync_now()
+    assert a.day_plan["date"] == "2026-10-12"
+    assert json.loads((env.box / "day-plan.json").read_text(encoding="utf-8"))["date"] == "2026-10-12"
+
+
+def test_plan_card_shows_todays_or_tomorrows_plan(env, clock):
+    a = env.computer("a", github=False)
+    alpha = add(a, "Alpha", 30)
+    a.panel.show()
+    _write_plan(env, _plan("2026-10-12", [_block(alpha, "09:00", "09:30", 30)]))
+    a.check_shared()
+    p = a.panel
+    assert "Mon 10/12" in p.plan_heading.text() and "made 19:07" in p.plan_heading.text()
+    assert _texts(p.plan_list) == ["09:00-09:30  Alpha  (30m)"]
+    assert "needs 30 min more" in p.plan_warn.text() and p.plan_warn.isVisibleTo(p)
+    # (two blocks, so the file's size changes too and the change is seen even within one file-time tick)
+    _write_plan(env, _plan("2026-10-13", [_block(alpha, "10:00", "10:15", 15), _block(alpha, "11:00", "11:15", 15)],
+                           made="2026-10-13T00:07:01.000Z"))
+    a.check_shared()
+    assert "Tue 10/13" in p.plan_heading.text()
+    _write_plan(env, _plan("2026-10-11", [], made="2026-10-11T00:07:02.000Z"))
+    a.check_shared()
+    assert p.plan_heading.text().startswith("No plan yet") and p.plan_list.count() == 0
+
+
+def test_up_next_follows_the_current_block(env, clock):
+    a = env.computer("a", github=False)
+    gamma, beta, alpha = add(a, "Gamma"), add(a, "Beta"), add(a, "Alpha")
+    _write_plan(env, _plan("2026-10-12", [_block(beta, "09:00", "10:00", 60), _block(gamma, "10:00", "11:00", 60)]))
+    a.check_shared()
+    clock.t = T0 + timedelta(minutes=30)
+    assert a.current_task() is beta
+    clock.t = T0 + timedelta(minutes=90)
+    assert a.current_task() is gamma
+    clock.t = T0 + timedelta(minutes=150)
+    assert a.current_task() is alpha
+
+
+# ---------- working hours ----------
+
+def test_working_hours_dialog_validates_and_saves(env):
+    a = env.computer("a", github=False)
+    dlg = env.ft.WorkingHoursDialog(a)
+    assert dlg.edits["mon"].text() == "09:00-12:00, 13:30-18:00"
+    dlg.edits["mon"].setText("9-12")
+    assert dlg.apply() is not None
+    assert a.planner["windows"]["mon"] == ["09:00-12:00", "13:30-18:00"]
+    dlg.edits["mon"].setText("12:00-09:00")
+    assert dlg.apply() is not None
+    dlg.edits["mon"].setText("13:00-17:00, 8:30-12:00")
+    dlg.edits["sat"].setText("")
+    assert dlg.apply() is None
+    saved = json.loads((env.box / "state.json").read_text(encoding="utf-8"))["planner"]
+    assert saved["windows"]["mon"] == ["08:30-12:00", "13:00-17:00"] and saved["windows"]["sat"] == []
+    assert saved["updated_at"] != fc.EPOCH
+
+
+# ---------- Box mode follow-ups ----------
+
+def test_box_write_merges_a_change_saved_meanwhile(env):
+    here, there = env.computer("a", github=False), env.computer("b", github=False)
+    add(here, "Alpha")
+    there.check_shared()
+    add(there, "Beta")
+    here.plan.tasks.append(fc.Task("Gamma", 5))
+    here.changed()  # here has not looked at the file since there saved Beta
+    assert sorted(t.name for t in fc.load_state(env.box / "state.json").plan.tasks) == ["Alpha", "Beta", "Gamma"]
+    assert sorted(names(here)) == ["Alpha", "Beta", "Gamma"]
+
+
+def test_box_write_never_replaces_a_newer_file_saved_meanwhile(env):
+    here = env.computer("a", github=False)
+    add(here, "Alpha")
+    text = json.dumps({"version": 4, "plan": {"tasks": []}})
+    (env.box / "state.json").write_text(text, encoding="utf-8")
+    add(here, "Beta")
+    assert (env.box / "state.json").read_text(encoding="utf-8") == text
+    assert "not saved" in here.status_message
+
+
+def test_adopting_from_box_then_one_edit_keeps_the_other_stamps(env):
+    there = env.computer("b", github=False)
+    add(there, "Beta")
+    add(there, "Alpha")
+    here = env.computer("a", github=False)
+    add(there, "Gamma")
+    here.check_shared()
+    before = {t["name"]: t["updated_at"] for t in json.loads(
+        (env.box / "state.json").read_text(encoding="utf-8"))["plan"]["tasks"]}
+    time.sleep(0.01)
+    next(t for t in here.plan.tasks if t.name == "Alpha").estimate_min = 25
+    here.changed()
+    after = {t["name"]: t["updated_at"] for t in json.loads(
+        (env.box / "state.json").read_text(encoding="utf-8"))["plan"]["tasks"]}
+    assert after["Beta"] == before["Beta"] and after["Gamma"] == before["Gamma"]
+    assert after["Alpha"] != before["Alpha"]
+
+
+def test_repeats_wake_up_after_midnight(env, clock):
+    a = env.computer("a", github=False)
+    add(a, "Walk", repeat={"kind": "daily"}, last_done="2026-10-12")
+    a.panel.show()
+    dim = QColor(a.s["colors"]["text_dim"])
+    assert a.panel.list.item(0).foreground().color() == dim
+    clock.t = datetime(2026, 10, 13, 0, 1)
+    a.on_tick()
+    assert a.panel.list.item(0).foreground().color() != dim
+    assert a.current_task().name == "Walk"
+
+
+def test_malformed_dates_from_another_device_do_not_crash(env, clock):
+    a = env.computer("a", github=False)
+    add(a, "Walk", repeat={"kind": "every", "every": 2, "anchor": "someday"})
+    add(a, "Alpha", deadline="soon")
+    a.panel.show()
+    a.panel.refresh()
+    assert any("Alpha" in x for x in _texts(a.panel.dated_list))
+    a.panel.dated_list.setCurrentRow(0)
+    assert not a.panel.ed_deadline_on.isChecked()
+    assert a.current_task() is not None
+    a.replan_now()  # never raises; the planner's complaint goes to the status line

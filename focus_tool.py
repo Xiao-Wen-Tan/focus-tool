@@ -31,12 +31,17 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import queue
+import re
 import shutil
 import sys
+import threading
 import time
 import winsound
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+from datetime import datetime as _real_datetime  # for parsing only; see the note below
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import (QAbstractNativeEventFilter, QDate, QEasingCurve, QPoint, QPropertyAnimation, QRect,
                             QRectF, Qt, QTimer, Property, Signal)
@@ -47,9 +52,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import focus_core as fc
+import gh_store
+import planner
 
 # The tests replace this module's `datetime` with a clock that only has now(), so this file only ever
-# calls datetime.now(). Dates come from `date`, and change stamps from fc.now_iso().
+# calls datetime.now(). Dates come from `date`, change stamps from fc.now_iso(), and text is parsed with
+# _real_datetime.
 
 APP_NAME = "FocusTool"
 CHECK_EVERY_MS = 250
@@ -60,7 +68,11 @@ TIME_PRESETS = (5, 10, 15, 25, 30, 45, 60, 90)
 MINI_SIZE = 64            # the shrunk widget is a circle this many pixels wide
 DETAILS_DEFAULT_H = 140   # starting height of the details box in the task panel
 DETAILS_MIN_H = 60
-NEWER_FILE_MESSAGE = "Your list was saved by a newer Focus Tool. Please update this app."
+NEWER_FILE_MESSAGE = ("Your list was saved by a newer Focus Tool. Please update this app. "
+                      "Changes made here are not saved until you do.")
+SYNC_POLL_S = 15.0        # how often GitHub mode looks for changes
+SYNC_DEBOUNCE_S = 2.0     # GitHub mode pushes this long after a local change
+AMBER = "#B7791F"
 REPEAT_CHOICES = ("Never", "Every day", "Weekdays", "Chosen days", "Every N days")
 REPEAT_KINDS = (None, "daily", "weekdays", "days", "every")
 DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -170,6 +182,155 @@ def load_settings() -> dict:
     merged = {**defaults, **user}
     merged["colors"] = {**defaults["colors"], **user.get("colors", {})}
     return merged
+
+
+# ---------------------------------------------------------------- GitHub sync (no Qt here)
+
+def make_sync_engine(cfg: dict) -> gh_store.SyncEngine:
+    """The GitHub sync engine for cfg = {owner, repo, branch, token}. Its cache, which also keeps edits
+    not yet pushed, is %APPDATA%\\FocusTool\\github-cache.json. The tests replace this function."""
+    store = gh_store.GitHubStore(cfg["owner"], cfg["repo"], cfg["token"], branch=cfg.get("branch") or "main")
+    return gh_store.SyncEngine(store, local_dir() / "github-cache.json")
+
+
+def load_token() -> str | None:
+    """The saved GitHub token, or None (also when the Credential Manager cannot be used)."""
+    try:
+        return gh_store.load_token() or None
+    except Exception:
+        return None
+
+
+def _short(ex) -> str:
+    text = str(getattr(ex, "message", "") or ex).strip().splitlines()
+    text = text[0] if text else type(ex).__name__
+    return text if len(text) <= 70 else text[:67] + "..."
+
+
+def _comparable(doc: dict) -> str:
+    """A doc as text, leaving out what does not count as a change (current_index, geometry, timer marks)."""
+    d = copy.deepcopy(doc)
+    d.pop("current_index", None)
+    d.pop("geometry", None)
+    for k in ("fired", "checkpoints"):
+        (d.get("timer") or {}).pop(k, None)
+    return fc.canonical(d)
+
+
+def same_doc(a: dict | None, b: dict | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return _comparable(a) == _comparable(b)
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_sync_cache(path: Path) -> dict:
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def store_local_doc(cache_path: Path, doc: dict, unsynced: bool) -> None:
+    """Keep this computer's list in the sync cache, so edits made offline survive a restart. Only the
+    sync worker (or code holding its lock) calls this, because SyncEngine rewrites the same file."""
+    cache = read_sync_cache(cache_path)
+    cache["local_doc"], cache["local_unsynced"] = doc, bool(unsynced)
+    try:
+        _write_atomic(Path(cache_path), json.dumps(cache, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def run_job(job: tuple) -> dict:
+    """Do one piece of GitHub work (network, so never on the Qt thread except in tests).
+    ("sync", engine, doc) syncs the list and then reads day-plan.json. ("put_plan", engine, plan) uploads
+    a day plan. Returns a result dict for FocusWidget._apply_job_result."""
+    kind, engine = job[0], job[1]
+    out = {"kind": kind, "engine": engine}
+    if kind == "put_plan":
+        try:
+            gh_store.put_day_plan(engine.store, job[2])
+            out["error"] = None
+        except Exception as ex:
+            out["error"] = _short(ex)
+        return out
+    doc = job[2]
+    store_local_doc(engine.cache_path, doc, True)
+    try:
+        res = engine.sync(doc)
+    except fc.NewerVersionError:
+        out["newer"] = True
+        return out
+    except Exception as ex:  # a bug or an odd answer must never stop the app
+        res = gh_store.SyncResult(doc, False, False, "error", _short(ex), None)
+    out["result"] = res
+    store_local_doc(engine.cache_path, res.doc, res.status != "ok")
+    if res.status == "ok":
+        try:
+            out["plan"] = gh_store.fetch_day_plan(engine.store)
+        except Exception:
+            pass  # the list synced; the plan is read again next time
+    return out
+
+
+# ---------------------------------------------------------------- day plan and working hours (no Qt here)
+
+def parse_date(text) -> date | None:
+    """'2026-10-16' as a date; None for anything else (a device may have saved something odd)."""
+    try:
+        return date.fromisoformat(text) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def local_to_utc(naive: datetime, tz: str) -> datetime:
+    """A naive local time in the planner's time zone, as an aware UTC time."""
+    try:
+        return naive.replace(tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+    except Exception:
+        return naive.astimezone(timezone.utc)
+
+
+def made_time(plan: dict) -> str:
+    """When a day plan was made, as local 'HH:MM' in its time zone ('' if unknown)."""
+    try:
+        made = _real_datetime.strptime(plan["generated_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return made.astimezone(ZoneInfo(plan.get("tz") or "America/Chicago")).strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+_SPAN_RE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")
+
+
+def parse_windows(text: str) -> list[str]:
+    """'13:30-18:00, 9:00-12:00' as ['09:00-12:00', '13:30-18:00']. Empty text means no working time.
+    Raises ValueError with a plain message for anything else."""
+    spans = []
+    for part in [p.strip() for p in text.split(",") if p.strip()]:
+        m = _SPAN_RE.fullmatch(part)
+        if not m:
+            raise ValueError(f"'{part}' should look like 09:00-12:00.")
+        h1, m1, h2, m2 = (int(x) for x in m.groups())
+        if max(h1, h2) > 23 or max(m1, m2) > 59:
+            raise ValueError(f"'{part}' is not a time of day.")
+        a, b = h1 * 60 + m1, h2 * 60 + m2
+        if a >= b:
+            raise ValueError(f"In '{part}' the start must be before the end.")
+        spans.append((a, b, f"{h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}"))
+    spans.sort()
+    for x, y in zip(spans, spans[1:]):
+        if y[0] < x[1]:
+            raise ValueError(f"'{x[2]}' and '{y[2]}' overlap.")
+    return [s[2] for s in spans]
 
 
 # ---------------------------------------------------------------- global hotkey (Win32)
@@ -368,9 +529,10 @@ def _iso(q: QDate) -> str:
 
 
 def short_date(iso: str) -> str:
-    """'2026-10-16' as 'Fri 10/16' (English day names whatever the Windows language is)."""
-    d = date.fromisoformat(iso)
-    return f"{DAY_LABELS[d.weekday()]} {d.month}/{d.day}"
+    """'2026-10-16' as 'Fri 10/16' (English day names whatever the Windows language is). Text that is
+    not a date comes back as it is."""
+    d = parse_date(iso)
+    return f"{DAY_LABELS[d.weekday()]} {d.month}/{d.day}" if d else str(iso)
 
 
 def first_date(t: fc.Task) -> str | None:
@@ -455,6 +617,170 @@ class FoldersDialog(QDialog):
             self.fill()
 
 
+class WorkingHoursDialog(QDialog):
+    """The hours the planner may fill, one line per day, such as '09:00-12:00, 13:30-18:00'."""
+
+    def __init__(self, widget: "FocusWidget"):
+        super().__init__(widget.panel if widget.panel.isVisible() else None)
+        self.w = widget
+        self.setWindowTitle("Working hours")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setStyleSheet(panel_stylesheet(widget.s["colors"]))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        hint = QLabel("The planner fills these hours. Separate two spans with a comma. Leave a day empty for "
+                      "no work that day.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        windows = (widget.planner or fc.DEFAULT_PLANNER).get("windows", {})
+        self.edits: dict[str, QLineEdit] = {}
+        for key, label in zip(fc.WEEKDAY_KEYS, DAY_LABELS):
+            row = QHBoxLayout()
+            lab = QLabel(label)
+            lab.setMinimumWidth(40)
+            row.addWidget(lab)
+            edit = QLineEdit(", ".join(windows.get(key, [])))
+            edit.setPlaceholderText("No work")
+            edit.setMinimumWidth(260)
+            self.edits[key] = edit
+            row.addWidget(edit)
+            lay.addLayout(row)
+        self.error = QLabel()
+        self.error.setWordWrap(True)
+        self.error.setStyleSheet("color: #B5523B;")
+        lay.addWidget(self.error)
+        brow = QHBoxLayout()
+        brow.addStretch()
+        b_cancel = QPushButton("Cancel")
+        b_cancel.clicked.connect(self.reject)
+        b_save = QPushButton("Save")
+        b_save.setObjectName("primary")
+        b_save.clicked.connect(self._save)
+        brow.addWidget(b_cancel)
+        brow.addWidget(b_save)
+        lay.addLayout(brow)
+
+    def apply(self) -> str | None:
+        """Check every line and save them. Returns the problem as text, or None when saved."""
+        windows = {}
+        for key, label in zip(fc.WEEKDAY_KEYS, DAY_LABELS):
+            try:
+                windows[key] = parse_windows(self.edits[key].text())
+            except ValueError as ex:
+                message = f"Check {label}. {ex}"
+                self.error.setText(message)
+                return message
+        self.error.clear()
+        self.w.set_working_hours(windows)
+        return None
+
+    def _save(self):
+        if self.apply() is None:
+            self.accept()
+
+
+class GitHubDialog(QDialog):
+    """Connect to the private GitHub repo that holds the list, so the phone and this computer share it."""
+    checked = Signal(str)  # the Test button's answer, sent from its thread
+
+    def __init__(self, widget: "FocusWidget"):
+        super().__init__(widget.panel if widget.panel.isVisible() else None)
+        self.w = widget
+        self.setWindowTitle("GitHub sync")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setStyleSheet(panel_stylesheet(widget.s["colors"]))
+        cfg = widget._gh_cfg or {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        hint = QLabel("Your list is kept in a private GitHub repository that the phone also reads. The token "
+                      "is saved in the Windows Credential Manager, never in a file.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.owner = QLineEdit(cfg.get("owner", ""))
+        self.repo = QLineEdit(cfg.get("repo", "") or "focus-data")
+        self.branch = QLineEdit(cfg.get("branch", "") or "main")
+        self.token = QLineEdit()
+        self.token.setEchoMode(QLineEdit.Password)
+        self.token.setPlaceholderText("Saved. Leave empty to keep it." if load_token()
+                                      else "Fine-grained token with Contents read and write")
+        for label, edit in (("Owner", self.owner), ("Repository", self.repo), ("Branch", self.branch),
+                            ("Token", self.token)):
+            row = QHBoxLayout()
+            lab = QLabel(label)
+            lab.setMinimumWidth(110)
+            row.addWidget(lab)
+            edit.setMinimumWidth(280)
+            row.addWidget(edit)
+            lay.addLayout(row)
+        self.result = QLabel(widget.sync_status or ("Not connected. The list is kept in Box only."
+                                                    if widget.mode == "box" else ""))
+        self.result.setObjectName("hint")
+        self.result.setWordWrap(True)
+        lay.addWidget(self.result)
+        self.checked.connect(self.result.setText)
+        brow = QHBoxLayout()
+        for label, fn in (("Test", self.test), ("Disconnect", self.disconnect)):
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, fn=fn: fn())
+            brow.addWidget(b)
+        brow.addStretch()
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.reject)
+        brow.addWidget(b_close)
+        b_save = QPushButton("Save")
+        b_save.setObjectName("primary")
+        b_save.clicked.connect(lambda: self.save())
+        brow.addWidget(b_save)
+        lay.addLayout(brow)
+
+    def _config(self) -> dict:
+        return {"owner": self.owner.text().strip(), "repo": self.repo.text().strip(),
+                "branch": self.branch.text().strip() or "main"}
+
+    def test(self):
+        cfg, token = self._config(), self.token.text().strip() or load_token()
+        if not (cfg["owner"] and cfg["repo"] and token):
+            self.result.setText("Fill in the owner, the repository and a token first.")
+            return
+        self.result.setText("Checking...")
+        try:
+            store = make_sync_engine({**cfg, "token": token}).store
+        except Exception as ex:
+            self.result.setText(f"Could not check ({_short(ex)}).")
+            return
+
+        def check():  # network, so on its own thread; the answer comes back through the `checked` signal
+            try:
+                self.checked.emit(store.check())
+            except RuntimeError:
+                pass  # the dialog was closed meanwhile
+
+        threading.Thread(target=check, daemon=True).start()
+
+    def save(self) -> bool:
+        cfg, typed = self._config(), self.token.text().strip()
+        token = typed or load_token()
+        if not (cfg["owner"] and cfg["repo"] and token):
+            self.result.setText("Fill in the owner, the repository and a token first.")
+            return False
+        if typed:
+            try:
+                gh_store.save_token(typed)
+            except Exception as ex:
+                self.result.setText(f"Could not save the token ({_short(ex)}).")
+                return False
+        self.w.connect_github(cfg, token)
+        self.accept()
+        return True
+
+    def disconnect(self):
+        self.w.disconnect_github()
+        self.token.clear()
+        self.result.setText("Disconnected. The list is kept in Box only.")
+
+
 # ---------------------------------------------------------------- task panel
 
 _KEEP = object()  # passed to TaskPanel.refresh to keep the current selection
@@ -493,6 +819,9 @@ class TaskPanel(QWidget):
         title = QLabel("🌱 Tasks")
         title.setObjectName("title")
         head.addWidget(title)
+        self.sync_label = QLabel()  # GitHub mode, such as "Synced 18:42"
+        self.sync_label.setObjectName("hint")
+        head.addWidget(self.sync_label)
         head.addStretch()
         self.btn_toggle = QPushButton("▶ Start")
         self.btn_toggle.setObjectName("primary")
@@ -583,6 +912,31 @@ class TaskPanel(QWidget):
         trow.addWidget(self.b_add)
         tc.addLayout(trow)
         root.addWidget(task_card)
+
+        # -- the day plan made by the planner (on GitHub every evening, or with Re-plan now)
+        self.plan_card, pc = card("🗓 Day plan")
+        self.plan_heading = QLabel()
+        self.plan_heading.setObjectName("hint")
+        self.plan_heading.setWordWrap(True)
+        pc.addWidget(self.plan_heading)
+        self.plan_warn = QLabel()
+        self.plan_warn.setWordWrap(True)
+        self.plan_warn.setStyleSheet(f"color: {AMBER};")
+        self.plan_warn.hide()
+        pc.addWidget(self.plan_warn)
+        self.plan_list = QListWidget()
+        self.plan_list.setMinimumHeight(90)
+        self.plan_list.setToolTip("Double-click a block to start its task")
+        self.plan_list.itemDoubleClicked.connect(self._start_plan_item)
+        pc.addWidget(self.plan_list)
+        prow = QHBoxLayout()
+        prow.addStretch()
+        self.b_replan = QPushButton("Re-plan now")
+        self.b_replan.setToolTip("Plan the rest of today from now. After 7 pm it plans tomorrow.")
+        self.b_replan.clicked.connect(lambda: self.w.replan_now())
+        prow.addWidget(self.b_replan)
+        pc.addLayout(prow)
+        root.addWidget(self.plan_card)
 
         # -- which folder to show
         show = QHBoxLayout()
@@ -681,6 +1035,39 @@ class TaskPanel(QWidget):
         self.status_label.setText(message)
         self.status_label.setVisible(bool(message))
 
+    def show_sync(self, text: str):
+        self.sync_label.setText(text)
+
+    def refresh_plan(self):
+        """Show today's plan, or tomorrow's once it is made."""
+        plan = self.w.shown_plan()
+        self.plan_list.clear()
+        if plan is None:
+            self.plan_heading.setText("No plan yet. Re-plan now makes one for the rest of today.")
+            self.plan_warn.hide()
+            return
+        made = made_time(plan)
+        self.plan_heading.setText(f"Plan for {short_date(plan.get('date'))}" + (f", made {made}" if made else ""))
+        warns = [f"⚠ {x.get('name', '')} · {x.get('message', '')}" for x in plan.get("warnings") or []
+                 if isinstance(x, dict)]
+        self.plan_warn.setText("\n".join(warns))
+        self.plan_warn.setVisible(bool(warns))
+        names = {t.id: t.name for t in self.w.plan.tasks}
+        for b in plan.get("blocks") or []:
+            if not isinstance(b, dict):
+                continue
+            name = names.get(b.get("task_id"), b.get("name", ""))
+            item = QListWidgetItem(f"{b.get('start', '')}-{b.get('end', '')}  {name}  ({b.get('minutes', 0)}m)")
+            item.setData(Qt.UserRole, b.get("task_id"))
+            if b.get("task_id") not in names:
+                item.setForeground(QColor(self.w.s["colors"]["text_dim"]))  # finished or removed since
+            self.plan_list.addItem(item)
+
+    def _start_plan_item(self, item: QListWidgetItem):
+        t = self._task_by_id(item.data(Qt.UserRole))
+        if t is not None:
+            self.w.start_task(t)
+
     # -- refresh from model
     def showEvent(self, e):
         self.refresh()
@@ -772,11 +1159,16 @@ class TaskPanel(QWidget):
             self.done_list.addItem(QListWidgetItem(f"{when}   {d.name}   ({d.estimate_min}m planned, {actual})"))
         self._updating = False
         self.show_status(self.w.status_message)
+        self.show_sync(self.w.sync_status)
+        self.refresh_plan()
         self._load_editor()
         self.update_toggle()
 
     def _rest_text(self, t: fc.Task) -> str:
-        nxt = fc.next_active_day(t, self.w.today())
+        try:
+            nxt = fc.next_active_day(t, self.w.today())
+        except (ValueError, TypeError, KeyError):
+            nxt = None  # a rule saved oddly by another device
         return f"Resting until {short_date(nxt.isoformat())}" if nxt else "Resting, since no days are chosen"
 
     def _fill_folder_combos(self):
@@ -866,8 +1258,9 @@ class TaskPanel(QWidget):
         today = self.w.today()
         for on, edit, value in ((self.ed_deadline_on, self.ed_deadline, deadline),
                                 (self.ed_target_on, self.ed_target, target)):
-            on.setChecked(bool(value))
-            edit.setDate(_qdate(date.fromisoformat(value) if value else today))
+            d = parse_date(value)  # text that is not a date counts as no date
+            on.setChecked(d is not None)
+            edit.setDate(_qdate(d or today))
         self._set_folder_choice(folder)
         rule = repeat or {}
         kind = rule.get("kind")
@@ -1086,7 +1479,7 @@ class TaskPanel(QWidget):
         """Finish the selected task. With nothing selected, finish the task on the timer (or the next one)."""
         t = self.selected_task()
         self.w.done(t)
-        self.refresh(t.id if t is not None and t in self.w.plan.tasks else None)
+        self.refresh(t.id if t is not None and any(x.id == t.id for x in self.w.plan.tasks) else None)
 
     # -- completed
     def _done_index(self) -> int:
@@ -1114,7 +1507,9 @@ class TaskPanel(QWidget):
 # ---------------------------------------------------------------- the widget
 
 class FocusWidget(QWidget):
-    status_changed = Signal(str)  # a warning for the tray tooltip, such as a list saved by a newer app
+    # Sync status and warnings for the tray, as (tooltip text, True to also pop up a notice)
+    status_changed = Signal(str, bool)
+    AUTO_SYNC = True  # GitHub mode syncs on a worker thread; tests turn this off and call sync_now()
 
     def __init__(self, settings: dict):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -1134,6 +1529,10 @@ class FocusWidget(QWidget):
         local = _read_json(self.local_path)
         geometry = local.get("geometry")
         self._merged = bool(local.get("merged_into_shared"))
+        gh = local.get("github")
+        self._gh_cfg: dict | None = ({k: str(gh.get(k) or "") for k in ("owner", "repo", "branch")}
+                                    if isinstance(gh, dict) and gh.get("owner") and gh.get("repo") else None)
+        self._gh_imported = bool(local.get("github_imported"))  # the Box list was merged into GitHub once
         if not self._merged:
             try:
                 old_geometry = merge_old_local_data(local_dir(), shared)
@@ -1149,6 +1548,23 @@ class FocusWidget(QWidget):
         self._stamp_import = False  # True after reading a file older than version 3 (see _stamped_doc)
         self._blocked = False  # True once the shared file turned out to be from a newer app, so it is never written
         self.status_message = ""  # a warning for the panel header and the tray tooltip
+        self.mode = "box"  # "github" when local.json names a repo and a token is saved
+        self.sync_status = ""  # GitHub mode, such as "Synced 18:42"
+        self._engine: gh_store.SyncEngine | None = None
+        self._jobs: queue.Queue = queue.Queue()  # work for the sync thread
+        self._results: queue.Queue = queue.Queue()  # its answers, applied by on_tick on the Qt thread
+        self._job_lock = threading.Lock()  # one GitHub job at a time (they share the cache file)
+        self._worker: threading.Thread | None = None
+        self._job_pending = False  # a sync job is queued or running
+        self._sync_due: float | None = None  # time.monotonic() when a change should be pushed
+        self._last_sync_at = float("-inf")
+        self._sync_not_before = 0.0  # after a rate limit, wait until this time.monotonic()
+        self._mirror_text: str | None = None  # what GitHub mode last wrote to the Box copy
+        self.day_plan: dict | None = None
+        self.plan_path = shared / "day-plan.json"
+        self._plan_sig: tuple[int, int] | None = None
+        self._read_day_plan()
+        self._day = self.today()
         got = self._read_shared()
         self._adopt(got[0] if got else fc.State(fc.Plan(), 0, fc.TimerState()))
         self._last_doc = self._snapshot()
@@ -1178,6 +1594,10 @@ class FocusWidget(QWidget):
         self._build_ask_row()
         self._build_buttons()
         self.panel = TaskPanel(self)
+        if self._gh_cfg is not None:
+            token = load_token()
+            if token:
+                self._start_github(token)
 
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self.on_tick)
@@ -1188,7 +1608,7 @@ class FocusWidget(QWidget):
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.check_shared)
         self.sync_timer.start(SYNC_CHECK_MS)
-        self.save()  # writes the shared file only if reading it needed an upgrade to version 3
+        self.save()  # writes the shared file only if reading it needed an upgrade (or the GitHub import)
 
     # -- pulse property for the animation
     def get_pulse(self) -> float:
@@ -1206,7 +1626,10 @@ class FocusWidget(QWidget):
 
     def is_asleep(self, t: fc.Task) -> bool:
         """A repeating task that is done for today, or not due today. It cannot be started."""
-        return bool(t.repeat) and not fc.is_active(t, self.today())
+        try:
+            return bool(t.repeat) and not fc.is_active(t, self.today())
+        except (ValueError, TypeError, KeyError):
+            return False  # a rule saved oddly by another device, so keep the task usable
 
     def display_order(self) -> list[fc.Task]:
         """Tasks in the order the panel lists them, with dated tasks by date first and then the rest in your order."""
@@ -1214,10 +1637,18 @@ class FocusWidget(QWidget):
         return dated + ranked
 
     def current_task(self) -> fc.Task | None:
-        """The task on the timer, or when idle the first task that can be started (shown as 'Up next')."""
+        """The task on the timer. When idle, 'Up next' is the task of the day plan's current or next block,
+        or else the first task that can be started."""
         if self.timer.running and self.active is not None:
             return self.active
-        return next((t for t in self.display_order() if not self.is_asleep(t)), None)
+        live = [t for t in self.display_order() if not self.is_asleep(t)]
+        try:
+            block = fc.next_block(self.day_plan, datetime.now(), {t.id for t in live})
+        except (KeyError, TypeError, ValueError, AttributeError):
+            block = None  # a plan file this app cannot read
+        if block is not None:
+            return next(t for t in live if t.id == block.get("task_id"))
+        return live[0] if live else None
 
     def changed(self):
         """Call after any change to the tasks or timer: write it to the shared folder and repaint."""
@@ -1227,10 +1658,28 @@ class FocusWidget(QWidget):
         self._refresh_toggle_labels()
 
     def _set_status(self, message: str):
+        """A warning that stays, such as a list saved by a newer app (red, under the panel header)."""
         self.status_message = message
-        self.status_changed.emit(message)
+        self._emit_status(alert=bool(message))
         if getattr(self, "panel", None) is not None:
             self.panel.show_status(message)
+
+    def _set_sync_status(self, text: str, alert: bool = False):
+        """GitHub mode's state ("Synced 18:42", "Offline, will retry", ...) in the panel header and tray."""
+        if text == self.sync_status:
+            return
+        self.sync_status = text
+        self._emit_status(alert)
+        if getattr(self, "panel", None) is not None:
+            self.panel.show_sync(text)
+
+    def _emit_status(self, alert: bool):
+        self.status_changed.emit("\n".join(x for x in (self.sync_status, self.status_message) if x), alert)
+
+    def _block_newer(self):
+        """The list was saved by a newer app. Say so, and from now on never write it (until restart)."""
+        self._blocked = True
+        self._set_status(NEWER_FILE_MESSAGE)
 
     # -- folders
     def state_obj(self) -> fc.State:
@@ -1300,8 +1749,7 @@ class FocusWidget(QWidget):
             st = fc.doc_to_state(raw)
             old = int(raw.get("version", 1)) < fc.STATE_VERSION
         except fc.NewerVersionError:
-            self._blocked = True
-            self._set_status(NEWER_FILE_MESSAGE)
+            self._block_newer()
             return None
         except (OSError, ValueError, AttributeError, KeyError, TypeError):
             return None
@@ -1309,7 +1757,12 @@ class FocusWidget(QWidget):
         return st, old
 
     def check_shared(self):
-        """Every few seconds: show changes the other computer saved, or retry a write Box blocked."""
+        """Every few seconds in Box mode, show changes the other computer saved, or retry a write Box blocked.
+        GitHub mode never reads the Box copy; it syncs from on_tick instead."""
+        if self.mode == "github":
+            return
+        if _file_sig(self.plan_path) != self._plan_sig:
+            self._read_day_plan()
         if self._blocked:
             return
         if self._shared_dirty:
@@ -1324,11 +1777,12 @@ class FocusWidget(QWidget):
         if got is not None and self._shared_text != before:
             self._apply_state(*got)
 
-    def _apply_state(self, st: fc.State, old_file: bool = False):
-        """Show a list the other computer saved."""
+    def _apply_state(self, st: fc.State, old_file: bool = False, baseline: dict | None = None):
+        """Show a list another computer or the phone saved. `baseline` is that list as a doc; the next save
+        compares against it, so what came from elsewhere is never stamped again as a local edit."""
         was = (self.timer.running, self.timer.task_id, self.timer.task)
         self._adopt(st)
-        self._last_doc = self._snapshot()
+        self._last_doc = copy.deepcopy(baseline) if baseline is not None else self._snapshot()
         if old_file:
             self._mark_imported()
         same_task = was == (self.timer.running, self.timer.task_id, self.timer.task)
@@ -1465,7 +1919,12 @@ class FocusWidget(QWidget):
             self._save_shared()
 
     def _save_local(self):
-        _write_json(self.local_path, {"geometry": self.geometry_dict(), "merged_into_shared": self._merged})
+        d = {"geometry": self.geometry_dict(), "merged_into_shared": self._merged}
+        if self._gh_cfg is not None:
+            d["github"] = self._gh_cfg  # owner, repo, branch; the token is in the Windows Credential Manager
+        if self._gh_imported:
+            d["github_imported"] = True
+        _write_json(self.local_path, d)
 
     # -- building and writing the shared document (one place each)
     def build_doc(self) -> dict:
@@ -1497,12 +1956,31 @@ class FocusWidget(QWidget):
         self._stamp_import = False
 
     def _save_shared(self):
-        """Write the shared file (Box mode). Stamps are set right before writing; an unchanged list is not
-        written; a file saved by a newer app is never written."""
+        """Write the change (stamped right before writing). Box mode writes the shared file, but never an
+        unchanged list and never a file saved by a newer app. If another computer saved the file since this
+        one last read or wrote it, the two lists are merged first, so neither loses its edits.
+        GitHub mode instead commits the change locally and pushes it a moment later."""
         if self._blocked:
             return
+        if self.mode == "github":
+            self._commit_github()
+            return
         doc = self._stamped_doc()
-        if doc == self._last_doc and self._shared_text is not None:
+        sig = _file_sig(self.state_path)
+        if sig is not None and sig != self._shared_sig:
+            try:
+                disk = fc.migrate_doc(json.loads(self.state_path.read_text(encoding="utf-8")))
+            except fc.NewerVersionError:
+                self._block_newer()
+                return
+            except (OSError, ValueError, AttributeError, KeyError, TypeError):
+                disk = None  # half synced; this computer's list is the complete one
+            if disk is not None:
+                merged = fc.merge_docs(doc, disk)
+                if not same_doc(merged, doc):
+                    self._apply_state(fc.doc_to_state(merged), baseline=merged)
+                doc = merged
+        elif doc == self._last_doc and self._shared_text is not None:
             self._shared_dirty = False
             return
         try:
@@ -1512,6 +1990,303 @@ class FocusWidget(QWidget):
         self._take_stamps(doc)
         self._shared_sig, self._shared_text = _file_sig(self.state_path), text
         self._shared_dirty = False
+
+    # -- GitHub mode
+    def _commit_github(self):
+        """Take a local change into the baseline, copy it to Box, and push it a moment later."""
+        doc = self._stamped_doc()
+        if self._stamp_import or not same_doc(doc, self._last_doc):
+            self._take_stamps(doc)
+            self._write_mirror(doc)
+            self._sync_due = time.monotonic() + SYNC_DEBOUNCE_S
+        self._shared_dirty = False
+
+    def _write_mirror(self, doc: dict):
+        """GitHub mode keeps data\\state.json in Box as a backup copy. It is written, never read."""
+        st = fc.doc_to_state(doc)
+        text = json.dumps(fc.state_to_doc(st), indent=2, ensure_ascii=False)
+        if text == self._mirror_text:
+            return
+        try:
+            fc.save_state_obj(self.state_path, st)
+        except OSError:
+            return  # Box is holding the file; the next change writes it
+        self._mirror_text = text
+
+    def _start_github(self, token: str):
+        """Switch to GitHub mode. The starting list is the one kept in the sync cache (it holds edits not
+        pushed yet). On the first GitHub start of this computer, the Box list is merged in once."""
+        try:
+            engine = make_sync_engine({**self._gh_cfg, "token": token})
+        except Exception as ex:
+            self._set_sync_status(f"Sync error: {_short(ex)}")
+            return
+        if self._shared_dirty:
+            self._save_shared()  # still Box mode here, so this finishes the last Box write
+        self.stop_sync()
+        self._engine, self.mode = engine, "github"
+        self._jobs, self._results = queue.Queue(), queue.Queue()
+        self._job_pending, self._sync_due, self._last_sync_at = False, None, float("-inf")
+        cache = read_sync_cache(engine.cache_path)
+        start = None
+        for key in ("local_doc", "last_remote_doc"):
+            if isinstance(cache.get(key), dict):
+                try:
+                    start = fc.migrate_doc(cache[key])
+                    break
+                except fc.NewerVersionError:
+                    self._block_newer()
+                    return
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
+        if not self._gh_imported:
+            box = self.build_doc()  # the list read from Box
+            start = fc.merge_docs(start, box) if start is not None else fc.migrate_doc(box)
+            self._gh_imported = True
+            self._stamp_import = True  # fresh order, folder and timer stamps on the merged list
+        if start is not None and not same_doc(start, self._last_doc):
+            self._apply_state(fc.doc_to_state(start), baseline=start)
+        self._save_local()
+        if self._stamp_import:
+            self._shared_dirty = True
+            self._save_shared()
+            with self._job_lock:
+                store_local_doc(engine.cache_path, self._last_doc, True)  # keep the import even if we crash now
+        self._set_sync_status("Connecting to GitHub...")
+
+    def connect_github(self, cfg: dict, token: str):
+        """Use GitHub from now on (the GitHub sync dialog's Save)."""
+        cfg = {k: str(cfg.get(k) or "") for k in ("owner", "repo", "branch")}
+        cfg["branch"] = cfg["branch"] or "main"
+        if self.mode == "github" and cfg != self._gh_cfg:
+            self._forget_cache()  # the cache of another repo does not apply
+        self._gh_cfg = cfg
+        self._save_local()
+        self._start_github(token)
+
+    def disconnect_github(self):
+        """Go back to Box mode and forget the token and the repo. The list stays as it is and is saved to Box."""
+        try:
+            gh_store.delete_token()
+        except Exception:
+            pass
+        self.stop_sync()
+        self._forget_cache()
+        self._engine, self.mode, self._gh_cfg, self._gh_imported = None, "box", None, False
+        self._save_local()
+        self._set_sync_status("")
+        self._shared_sig, self._shared_text = _file_sig(self.state_path), self._mirror_text
+        self._mirror_text = None
+        if self.panel.isVisible():
+            self.panel.refresh()
+
+    def _forget_cache(self):
+        if self._engine is not None:
+            with self._job_lock:
+                try:
+                    self._engine.cache_path.unlink()
+                except OSError:
+                    pass
+
+    def stop_sync(self):
+        """Stop the sync thread (it finishes the job it is doing)."""
+        if self._worker is not None:
+            self._jobs.put(None)
+            self._worker = None
+
+    def shutdown(self):
+        """On quit, save, keep unpushed edits in the sync cache, and stop the sync thread."""
+        self.save()
+        if self.mode == "github" and self._engine is not None and self._job_lock.acquire(timeout=1.0):
+            try:
+                store_local_doc(self._engine.cache_path, self._last_doc, True)
+            finally:
+                self._job_lock.release()
+        self.stop_sync()
+
+    def _ensure_worker(self):
+        if self._worker is None or not self._worker.is_alive():
+            self._worker = threading.Thread(target=self._work, args=(self._jobs, self._results, self._job_lock),
+                                            daemon=True, name="FocusTool sync")
+            self._worker.start()
+
+    @staticmethod
+    def _work(jobs: queue.Queue, results: queue.Queue, lock: threading.Lock):
+        """The sync thread. It touches no Qt object and no live task; it only turns jobs into results."""
+        while True:
+            job = jobs.get()
+            if job is None:
+                return
+            with lock:
+                results.put(run_job(job))
+
+    def kick_sync(self):
+        """Queue a sync of the list as it is now."""
+        if self.mode != "github" or self._blocked or self._engine is None:
+            return
+        if self._shared_dirty:
+            self._save_shared()
+        if self.AUTO_SYNC:
+            self._ensure_worker()
+        self._jobs.put(("sync", self._engine, copy.deepcopy(self._last_doc)))
+        self._job_pending, self._sync_due, self._last_sync_at = True, None, time.monotonic()
+
+    def _sync_tick(self):
+        """Called by on_tick. Applies finished sync results and starts a sync when one is due."""
+        if self.mode != "github":
+            return
+        self.drain_sync_results()
+        if self._blocked or not self.AUTO_SYNC or self._job_pending:
+            return
+        due = self._sync_due if self._sync_due is not None else self._last_sync_at + SYNC_POLL_S
+        if time.monotonic() >= max(due, self._sync_not_before):
+            self.kick_sync()
+
+    def drain_sync_results(self):
+        while True:
+            try:
+                out = self._results.get_nowait()
+            except queue.Empty:
+                return
+            self._apply_job_result(out)
+
+    def sync_now(self) -> gh_store.SyncResult | None:
+        """Run the queued GitHub jobs and one sync right here, then apply the results. The app syncs on its
+        thread instead; this is for tests and returns the sync's SyncResult."""
+        if self.mode != "github" or self._blocked or self._engine is None:
+            return None
+        with self._job_lock:
+            while True:
+                try:
+                    job = self._jobs.get_nowait()
+                except queue.Empty:
+                    break
+                if job is not None:
+                    self._results.put(run_job(job))
+            self.drain_sync_results()
+            if self._shared_dirty:
+                self._save_shared()
+            out = run_job(("sync", self._engine, copy.deepcopy(self._last_doc)))
+        out["inline"] = True
+        self._last_sync_at = time.monotonic()
+        self._apply_job_result(out)
+        return out.get("result")
+
+    def _apply_job_result(self, out: dict):
+        """On the Qt thread, merge what GitHub had with the list as it is now (it may have changed while
+        the sync ran), show the result, copy it to Box, and say how the sync went."""
+        if out["kind"] == "sync" and not out.get("inline"):
+            self._job_pending = False
+        if out["engine"] is not self._engine or self.mode != "github":
+            return  # from before a disconnect or a switch to another repo
+        if out["kind"] == "put_plan":
+            if out["error"]:
+                self._set_sync_status(f"Sync error: {out['error']}")
+            return
+        if out.get("newer"):
+            self._block_newer()
+            return
+        res: gh_store.SyncResult = out["result"]
+        if self._shared_dirty:
+            self._save_shared()
+        try:
+            merged = fc.merge_docs(self._last_doc, res.doc)
+        except fc.NewerVersionError:
+            self._block_newer()
+            return
+        if not same_doc(merged, self._last_doc):
+            self._apply_state(fc.doc_to_state(merged), baseline=merged)
+        if res.status == "ok" and not same_doc(merged, res.doc):
+            self._sync_due = time.monotonic()  # edits made during the sync still need pushing
+        self._write_mirror(self._last_doc)
+        now = datetime.now()
+        if res.status == "ok":
+            self._set_sync_status(f"Synced {now:%H:%M}")
+        elif res.status == "offline":
+            self._set_sync_status("Offline, will retry")
+        elif res.status == "auth":
+            self._set_sync_status("GitHub token rejected", alert=True)
+        elif res.status == "rate_limited":
+            wait = float(res.retry_after_s or SYNC_POLL_S)
+            self._sync_not_before = time.monotonic() + wait
+            self._set_sync_status(f"GitHub busy, retrying at {now + timedelta(seconds=wait):%H:%M}")
+        else:
+            self._set_sync_status(f"Sync error: {_short(res.message or 'unknown')}")
+        if isinstance(out.get("plan"), dict):
+            self._set_day_plan(out["plan"], mirror=True)
+
+    # -- day plan
+    def _read_day_plan(self):
+        """Read data\\day-plan.json (Box mode, and at start). A half-synced file is skipped until it is whole."""
+        sig = _file_sig(self.plan_path)
+        if sig is None:
+            self._plan_sig = None
+            return
+        try:
+            plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        self._plan_sig = sig
+        if isinstance(plan, dict):
+            self._set_day_plan(plan, mirror=False, force=True)
+
+    def _set_day_plan(self, plan: dict, mirror: bool, force: bool = False):
+        """Show a day plan. Unless `force`, a plan older than the one shown is ignored (a sync may bring
+        back the plan from before a Re-plan that is still uploading). `mirror` writes data\\day-plan.json."""
+        old = self.day_plan or {}
+        if not force and str(plan.get("generated_at", "")) < str(old.get("generated_at", "")):
+            return
+        if mirror:
+            text = json.dumps(plan, indent=2, ensure_ascii=False)
+            try:
+                if not self.plan_path.exists() or self.plan_path.read_text(encoding="utf-8") != text:
+                    _write_atomic(self.plan_path, text)
+                self._plan_sig = _file_sig(self.plan_path)
+            except OSError:
+                pass
+        if fc.canonical(plan) != fc.canonical(old):
+            self.day_plan = plan
+            self.update()
+            panel = getattr(self, "panel", None)  # None while the widget is still being built
+            if panel is not None and panel.isVisible():
+                panel.refresh_plan()
+
+    def shown_plan(self) -> dict | None:
+        """The plan the panel shows, which is today's if there is one, else tomorrow's."""
+        p, today = self.day_plan, self.today()
+        if p and p.get("date") in (today.isoformat(), (today + timedelta(days=1)).isoformat()):
+            return p
+        return None
+
+    def replan_now(self):
+        """Plan the rest of today from now (after 7 pm, tomorrow) on this computer, save it to
+        data\\day-plan.json, and in GitHub mode upload it too."""
+        if self._shared_dirty:
+            self._save_shared()
+        tz = (self.planner or {}).get("tz") or "America/Chicago"
+        try:
+            plan = planner.plan_from_doc(self.build_doc(), local_to_utc(datetime.now(), tz), "now", by="desktop")
+        except Exception as ex:  # for example a date another device saved oddly
+            self._set_sync_status(f"Re-plan failed ({_short(ex)})")
+            return
+        if plan is None:
+            return
+        self._set_day_plan(plan, mirror=True, force=True)
+        if self.mode == "github" and self._engine is not None:
+            if self.AUTO_SYNC:
+                self._ensure_worker()
+            self._jobs.put(("put_plan", self._engine, plan))
+
+    def set_working_hours(self, windows: dict):
+        """New working hours for the planner, such as {"mon": ["09:00-12:00"], ...}."""
+        self.planner = {**copy.deepcopy(self.planner or fc.DEFAULT_PLANNER), "windows": copy.deepcopy(windows)}
+        self.changed()
+
+    def open_working_hours(self):
+        WorkingHoursDialog(self).exec()
+
+    def open_github_dialog(self):
+        GitHubDialog(self).exec()
 
     # -- dragging
     def mousePressEvent(self, e):
@@ -1674,6 +2449,12 @@ class FocusWidget(QWidget):
 
     # -- ticking
     def on_tick(self):
+        self._sync_tick()
+        if self.today() != self._day:  # past midnight, so repeats wake up and the plan card moves on a day
+            self._day = self.today()
+            self.update()
+            if self.panel.isVisible():
+                self.panel.refresh()
         if not self.timer.running or self.timer.paused:
             self.update()
             return
@@ -1888,6 +2669,8 @@ class TrayController:
         menu.addAction(QAction("Shrink / expand", menu, triggered=lambda: widget.set_mini(not widget.mini)))
         menu.addAction(QAction("Start / pause", menu, triggered=widget.toggle_run))
         menu.addAction(QAction("Folders...", menu, triggered=widget.open_folders))
+        menu.addAction(QAction("Working hours...", menu, triggered=widget.open_working_hours))
+        menu.addAction(QAction("GitHub sync...", menu, triggered=widget.open_github_dialog))
         menu.addSeparator()
         self.act_login = QAction("Start at login", menu, checkable=True)
         self.act_login.setChecked(startup_shortcut_path().exists())
@@ -1900,7 +2683,8 @@ class TrayController:
         self.tray.activated.connect(lambda reason: self.toggle() if reason == QSystemTrayIcon.Trigger else None)
         self.tray.show()
         widget.status_changed.connect(self.show_status)
-        self.show_status(widget.status_message)
+        self.show_status("\n".join(x for x in (widget.sync_status, widget.status_message) if x),
+                         bool(widget.status_message))
 
         mods, key = parse_hotkey(settings.get("hotkey_show_hide", "ctrl+alt+f"))
         self.filter = HotkeyFilter(self.toggle)
@@ -1908,11 +2692,11 @@ class TrayController:
         if key and not ctypes.windll.user32.RegisterHotKey(None, HOTKEY_ID, mods | 0x4000, key):
             self.tray.showMessage("Focus Tool", "Could not register the show/hide hotkey (already in use).", icon, 5000)
 
-    def show_status(self, message: str):
-        """Put a warning (such as a list saved by a newer app) in the tray tooltip, and pop it up once."""
-        self.tray.setToolTip(f"Focus Tool\n{message}" if message else "Focus Tool")
-        if message:
-            self.tray.showMessage("Focus Tool", message, QSystemTrayIcon.Warning, 8000)
+    def show_status(self, text: str, alert: bool = False):
+        """Put the sync status and any warning in the tray tooltip; pop up a notice for a warning."""
+        self.tray.setToolTip(f"Focus Tool\n{text}" if text else "Focus Tool")
+        if alert and text:
+            self.tray.showMessage("Focus Tool", text, QSystemTrayIcon.Warning, 8000)
 
     def toggle(self):
         if self.w.isVisible():
@@ -1934,7 +2718,7 @@ class TrayController:
             self.act_login.blockSignals(False)
 
     def quit(self):
-        self.w.save()
+        self.w.shutdown()
         ctypes.windll.user32.UnregisterHotKey(None, HOTKEY_ID)
         self.tray.hide()
         self.app.quit()
@@ -1948,7 +2732,7 @@ def main() -> int:
     widget = FocusWidget(settings)
     controller = TrayController(app, widget, settings)  # noqa: F841 (kept alive by reference)
     widget.show()
-    app.aboutToQuit.connect(widget.save)
+    app.aboutToQuit.connect(widget.shutdown)
     app.commitDataRequest.connect(lambda *_: widget.save())  # Windows log-off / shutdown
     return app.exec()
 
