@@ -13,17 +13,17 @@ import focus_core as fc  # noqa: E402
 # ---------- parse_plan ----------
 
 def test_parse_line_with_minutes_suffix():
-    plan = fc.parse_plan("Draft intro section 45m", default_minutes=45)
-    assert [(t.name, t.estimate_min) for t in plan.tasks] == [("Draft intro section", 45)]
+    plan = fc.parse_plan("Plan trip itinerary 45m", default_minutes=45)
+    assert [(t.name, t.estimate_min) for t in plan.tasks] == [("Plan trip itinerary", 45)]
 
 
 def test_parse_line_without_duration_uses_default():
-    plan = fc.parse_plan("Grade quiz", default_minutes=45)
+    plan = fc.parse_plan("Water plants", default_minutes=45)
     assert plan.tasks[0].estimate_min == 45
 
 
 def test_parse_accepts_min_and_hours_suffixes():
-    plan = fc.parse_plan("Reply to dean 10min\nRead paper 1.5h", default_minutes=45)
+    plan = fc.parse_plan("Call plumber 10min\nRead novel 1.5h", default_minutes=45)
     assert [t.estimate_min for t in plan.tasks] == [10, 90]
 
 
@@ -134,16 +134,16 @@ def test_load_state_missing_file_returns_empty_state(tmp_path):
 # ---------- v1.1: details, reordering ----------
 
 def test_parse_indented_lines_become_details_of_previous_task():
-    text = "Draft intro 45m\n  read reviewer 2 first\n  then fix figure 1\nEmail 5m"
+    text = "Plan trip 45m\n  check the bus times first\n  then book a seat\nEmail 5m"
     plan = fc.parse_plan(text, default_minutes=45)
-    assert [t.name for t in plan.tasks] == ["Draft intro", "Email"]
-    assert plan.tasks[0].details == "read reviewer 2 first\nthen fix figure 1"
+    assert [t.name for t in plan.tasks] == ["Plan trip", "Email"]
+    assert plan.tasks[0].details == "check the bus times first\nthen book a seat"
     assert plan.tasks[1].details == ""
 
 
 def test_parse_dash_lines_become_details_too():
-    plan = fc.parse_plan("Draft intro 45m\n- open the doc\nEmail", default_minutes=45)
-    assert plan.tasks[0].details == "open the doc"
+    plan = fc.parse_plan("Plan trip 45m\n- open the map\nEmail", default_minutes=45)
+    assert plan.tasks[0].details == "open the map"
 
 
 def test_details_survive_state_round_trip(tmp_path):
@@ -385,22 +385,22 @@ def test_v2_file_loads_and_saves_as_v3_round_trip(tmp_path):
 
 
 def test_v3_round_trip_keeps_every_field(tmp_path):
-    t = fc.Task("Alpha", 30, "d", 5.0, deadline="2026-10-16", target="2026-10-15", folder="Paper/Theory",
+    t = fc.Task("Alpha", 30, "d", 5.0, deadline="2026-10-16", target="2026-10-15", folder="Puzzle/Tiles",
                 updated_at="2026-10-12T10:00:00.000Z")
     r = fc.Task("Daily walk", 15, repeat={"kind": "every", "every": 2, "anchor": "2026-10-12"},
                 last_done="2026-10-12")
     timer = fc.TimerState()
     timer.start("Alpha", 30, T0, task_id=t.id)
     timer.updated_at = "2026-10-12T10:00:01.000Z"
-    st = fc.State(fc.Plan([t, r]), 0, timer, done=[fc.DoneTask("Beta", 5, 6, "2026-10-12 09:00", folder="Paper")],
+    st = fc.State(fc.Plan([t, r]), 0, timer, done=[fc.DoneTask("Beta", 5, 6, "2026-10-12 09:00", folder="Puzzle")],
                   deleted={"abc": "2026-10-12T09:00:00.000Z"}, order_updated_at="2026-10-12T08:00:00.000Z",
-                  folders=["Paper", "Paper/Theory"], folders_updated_at="2026-10-12T07:00:00.000Z")
+                  folders=["Puzzle", "Puzzle/Tiles"], folders_updated_at="2026-10-12T07:00:00.000Z")
     fc.save_state_obj(tmp_path / "s.json", st)
     back = fc.load_state(tmp_path / "s.json")
     assert fc.state_to_doc(back) == fc.state_to_doc(st)
     assert back.plan.tasks[0].deadline == "2026-10-16" and back.plan.tasks[1].repeat["every"] == 2
     assert back.timer.task_id == t.id and back.timer.updated_at == "2026-10-12T10:00:01.000Z"
-    assert back.done[0].folder == "Paper" and back.deleted == {"abc": "2026-10-12T09:00:00.000Z"}
+    assert back.done[0].folder == "Puzzle" and back.deleted == {"abc": "2026-10-12T09:00:00.000Z"}
     assert back.planner == fc.DEFAULT_PLANNER
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 3
 
@@ -418,9 +418,9 @@ def test_find_active_matches_by_id_first():
 
 
 def test_done_to_task_keeps_dates_and_folder_with_a_new_id():
-    d = fc.DoneTask("A", 10, 12, "2026-09-21 10:12", deadline="2026-10-16", folder="Paper")
+    d = fc.DoneTask("A", 10, 12, "2026-09-21 10:12", deadline="2026-10-16", folder="Puzzle")
     t = fc.done_to_task(d)
-    assert (t.deadline, t.folder) == ("2026-10-16", "Paper") and t.id != d.id
+    assert (t.deadline, t.folder) == ("2026-10-16", "Puzzle") and t.id != d.id
 
 
 # ---------- dates and sections ----------
@@ -511,38 +511,38 @@ def test_complete_repeat_logs_that_days_copy_and_sleeps_the_task():
 # ---------- folders ----------
 
 def test_in_folder_matches_the_folder_and_its_subfolders():
-    t = fc.Task("A", 5, folder="Paper/Theory")
-    assert fc.in_folder(t, None) and fc.in_folder(t, "Paper") and fc.in_folder(t, "Paper/Theory")
-    assert not fc.in_folder(t, "Pap") and not fc.in_folder(t, "Paper/Theory/Deep")
-    assert not fc.in_folder(fc.Task("B", 5), "Paper") and fc.in_folder(fc.Task("B", 5), None)
+    t = fc.Task("A", 5, folder="Puzzle/Tiles")
+    assert fc.in_folder(t, None) and fc.in_folder(t, "Puzzle") and fc.in_folder(t, "Puzzle/Tiles")
+    assert not fc.in_folder(t, "Puz") and not fc.in_folder(t, "Puzzle/Tiles/Deep")
+    assert not fc.in_folder(fc.Task("B", 5), "Puzzle") and fc.in_folder(fc.Task("B", 5), None)
 
 
 def test_folder_tree_includes_parents_and_sorts_children_under_parents():
-    tasks = [fc.Task("A", 5, folder="Teach/Fall/Week 1")]
-    assert fc.folder_tree(["Paper/Theory", "Paper B", "Paper"], tasks) == [
-        ("Paper", 0), ("Paper/Theory", 1), ("Paper B", 0), ("Teach", 0), ("Teach/Fall", 1), ("Teach/Fall/Week 1", 2)]
+    tasks = [fc.Task("A", 5, folder="Tennis/Fall/Week 1")]
+    assert fc.folder_tree(["Puzzle/Tiles", "Puzzle B", "Puzzle"], tasks) == [
+        ("Puzzle", 0), ("Puzzle/Tiles", 1), ("Puzzle B", 0), ("Tennis", 0), ("Tennis/Fall", 1), ("Tennis/Fall/Week 1", 2)]
 
 
 def _folder_state():
-    tasks = [fc.Task("A", 5, folder="Paper"), fc.Task("B", 5, folder="Paper/Theory"), fc.Task("C", 5, folder="Papers"),
+    tasks = [fc.Task("A", 5, folder="Puzzle"), fc.Task("B", 5, folder="Puzzle/Tiles"), fc.Task("C", 5, folder="Puzzles"),
              fc.Task("D", 5)]
-    done = [fc.DoneTask("E", 5, 5, "2026-10-01 09:00", folder="Paper/Theory")]
-    return fc.State(fc.Plan(tasks), 0, fc.TimerState(), done=done, folders=["Paper", "Paper/Theory", "Papers"])
+    done = [fc.DoneTask("E", 5, 5, "2026-10-01 09:00", folder="Puzzle/Tiles")]
+    return fc.State(fc.Plan(tasks), 0, fc.TimerState(), done=done, folders=["Puzzle", "Puzzle/Tiles", "Puzzles"])
 
 
 def test_rename_folder_moves_subfolders_tasks_and_done():
     st = _folder_state()
-    fc.rename_folder(st, "Paper", "Culture/Paper")
-    assert st.folders == ["Culture/Paper", "Culture/Paper/Theory", "Papers", "Culture"]
-    assert [t.folder for t in st.plan.tasks] == ["Culture/Paper", "Culture/Paper/Theory", "Papers", None]
-    assert st.done[0].folder == "Culture/Paper/Theory"
+    fc.rename_folder(st, "Puzzle", "Crafts/Puzzle")
+    assert st.folders == ["Crafts/Puzzle", "Crafts/Puzzle/Tiles", "Puzzles", "Crafts"]
+    assert [t.folder for t in st.plan.tasks] == ["Crafts/Puzzle", "Crafts/Puzzle/Tiles", "Puzzles", None]
+    assert st.done[0].folder == "Crafts/Puzzle/Tiles"
 
 
 def test_delete_folder_removes_subfolders_and_unfiles_their_tasks():
     st = _folder_state()
-    fc.delete_folder(st, "Paper")
-    assert st.folders == ["Papers"]
-    assert [t.folder for t in st.plan.tasks] == [None, None, "Papers", None]
+    fc.delete_folder(st, "Puzzle")
+    assert st.folders == ["Puzzles"]
+    assert [t.folder for t in st.plan.tasks] == [None, None, "Puzzles", None]
 
 
 # ---------- tools/migrate_state.py ----------
@@ -591,11 +591,11 @@ def test_load_state_still_returns_empty_state_for_a_half_synced_file(tmp_path):
 
 
 def test_finish_task_reuses_the_task_id_and_copies_fields():
-    t = fc.Task("Alpha", 30, "notes", 600.0, deadline="2026-10-16", target="2026-10-15", folder="Paper")
+    t = fc.Task("Alpha", 30, "notes", 600.0, deadline="2026-10-16", target="2026-10-15", folder="Puzzle")
     d = fc.finish_task(t, datetime(2026, 10, 12, 15, 2), 40)
     assert d.id == t.id
     assert (d.name, d.estimate_min, d.actual_min, d.finished_at, d.details, d.deadline, d.target, d.folder) == \
-           ("Alpha", 30, 40, "2026-10-12 15:02", "notes", "2026-10-16", "2026-10-15", "Paper")
+           ("Alpha", 30, 40, "2026-10-12 15:02", "notes", "2026-10-16", "2026-10-15", "Puzzle")
 
 
 def test_finish_task_on_a_repeat_delegates_to_complete_repeat():

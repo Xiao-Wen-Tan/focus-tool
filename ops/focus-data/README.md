@@ -52,8 +52,10 @@ gh workflow run replan.yml --repo YOUR-GITHUB-USERNAME/focus-data -f mode=now
 - `auto`, the same check the nightly job itself uses, planning only if it is
   past 19:00 and tomorrow has not already been planned.
 
-The same "Re-plan now" action is also available as a button inside the desktop
-app and the phone web app; both call this same workflow through the GitHub API.
+There is also a "Re-plan now" button in both apps, and the two work differently.
+The phone web app's button starts this same workflow through the GitHub API.
+The desktop app's button makes the plan on the computer itself, with the same
+planner, and uploads the new `day-plan.json` to this repo.
 
 ## Keeping your data private
 

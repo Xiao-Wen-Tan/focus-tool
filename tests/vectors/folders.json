@@ -11,7 +11,7 @@
         "spent_s": 0.0,
         "deadline": null,
         "target": null,
-        "folder": "Paper/Theory",
+        "folder": "Puzzle/Tiles",
         "repeat": null,
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
@@ -47,12 +47,12 @@
         "spent_s": 0.0,
         "deadline": null,
         "target": null,
-        "folder": "Paper/Theory",
+        "folder": "Puzzle/Tiles",
         "repeat": null,
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
       },
-      "path": "Paper/Theory",
+      "path": "Puzzle/Tiles",
       "expected": true
     },
     {
@@ -65,12 +65,12 @@
         "spent_s": 0.0,
         "deadline": null,
         "target": null,
-        "folder": "Paper/Theory",
+        "folder": "Puzzle/Tiles",
         "repeat": null,
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
       },
-      "path": "Paper",
+      "path": "Puzzle",
       "expected": true
     },
     {
@@ -83,12 +83,12 @@
         "spent_s": 0.0,
         "deadline": null,
         "target": null,
-        "folder": "Papers",
+        "folder": "Puzzles",
         "repeat": null,
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
       },
-      "path": "Paper",
+      "path": "Puzzle",
       "expected": false
     },
     {
@@ -101,12 +101,12 @@
         "spent_s": 0.0,
         "deadline": null,
         "target": null,
-        "folder": "Paper",
+        "folder": "Puzzle",
         "repeat": null,
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
       },
-      "path": "Paper/Theory",
+      "path": "Puzzle/Tiles",
       "expected": false
     },
     {
@@ -124,7 +124,7 @@
         "last_done": null,
         "updated_at": "1970-01-01T00:00:00.000Z"
       },
-      "path": "Paper",
+      "path": "Puzzle",
       "expected": false
     }
   ],
@@ -132,9 +132,9 @@
     {
       "description": "parents added, children right after their parent (sort by path parts)",
       "folders": [
-        "Paper/Theory",
-        "Paper B",
-        "Paper"
+        "Puzzle/Tiles",
+        "Puzzle B",
+        "Puzzle"
       ],
       "tasks": [
         {
@@ -145,7 +145,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Teach/Fall/Week 1",
+          "folder": "Tennis/Fall/Week 1",
           "repeat": null,
           "last_done": null,
           "updated_at": "1970-01-01T00:00:00.000Z"
@@ -153,27 +153,27 @@
       ],
       "expected": [
         [
-          "Paper",
+          "Puzzle",
           0
         ],
         [
-          "Paper/Theory",
+          "Puzzle/Tiles",
           1
         ],
         [
-          "Paper B",
+          "Puzzle B",
           0
         ],
         [
-          "Teach",
+          "Tennis",
           0
         ],
         [
-          "Teach/Fall",
+          "Tennis/Fall",
           1
         ],
         [
-          "Teach/Fall/Week 1",
+          "Tennis/Fall/Week 1",
           2
         ]
       ]

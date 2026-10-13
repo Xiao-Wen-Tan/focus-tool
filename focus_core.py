@@ -62,7 +62,7 @@ class Task:
     spent_s: float = 0.0  # time used before another task was started over it; picked up again when it restarts
     deadline: Optional[str] = None  # "YYYY-MM-DD", a hard date
     target: Optional[str] = None  # "YYYY-MM-DD", the date you aim to finish by
-    folder: Optional[str] = None  # "/"-separated path such as "Culture paper/Theory"
+    folder: Optional[str] = None  # "/"-separated path such as "Garden/Seeds"
     repeat: Optional[dict] = None  # see is_active
     last_done: Optional[str] = None  # "YYYY-MM-DD" a repeating task was last done
     id: str = field(default_factory=new_id)
@@ -763,7 +763,7 @@ def in_folder(task: Task, path: Optional[str]) -> bool:
 
 def folder_tree(folders: list, tasks: List[Task]) -> list:
     """Every known folder path with its depth (0 = top level), parents included, each folder followed by its
-    subfolders: [("Paper", 0), ("Paper/Theory", 1), ("Paper B", 0)]."""
+    subfolders: [("Puzzle", 0), ("Puzzle/Tiles", 1), ("Puzzle B", 0)]."""
     paths = {p for f in list(folders) + [t.folder for t in tasks if t.folder] for p in _with_parents(f)}
     return [(p, p.count("/")) for p in sorted(paths, key=lambda p: p.split("/"))]
 

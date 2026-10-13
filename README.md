@@ -36,7 +36,7 @@ automatic day plan that lays your tasks out against your working hours.
    To switch tasks, select a different task in the panel and press "Start
    selected". This works whether the current task is running or paused. The
    task you leave is paused and keeps the time it already used, and the list
-   shows it as, for example, "paused, 15m, send rejection (2 min used)". When
+   shows it as, for example, "paused, 15m, Water plants (2 min used)". When
    you start it again, the disk continues where it stopped (13 minutes left in
    that example), and Done records the minutes from every stretch. Done on a
    paused task you never restarted records the minutes it already used.
@@ -87,8 +87,8 @@ If a task has both a deadline and a target, the deadline wins.
 
 ## Folders
 
-Folders are labels, and can have subfolders, for example "Culture
-paper/Theory". Give a task a folder in the editor. Use the folder picker above
+Folders are labels, and can have subfolders, for example
+"Garden/Seeds". Give a task a folder in the editor. Use the folder picker above
 the list to show only one folder and its subfolders at a time, or "All
 folders" to see everything. There is one single order across all folders;
 folders only filter what you see, they do not change the order itself.
@@ -134,6 +134,13 @@ need to install anything from an app store.
    screen, its own icon, and it keeps working for a short time if you lose
    signal.
 
+On an iPhone, open the app from the Home Screen icon first and enter the
+token there (step 4 of the GitHub setup below). The Home Screen app keeps its
+own storage, separate from Safari, so a token typed into a Safari tab is not
+seen by the Home Screen app. Safari can also clear what a website stored if
+you have not opened it for 7 days, so a Safari tab is not a safe place to keep
+the token.
+
 The phone app and the desktop app share the same list through GitHub (see
 below), so a change on one shows up on the other within a few seconds, once
 both are online.
@@ -162,9 +169,17 @@ working exactly as before, saving to the `data` folder inside Box.
    repository owner (your GitHub username), the repository name
    (`focus-data`), and paste the token, then "Test" and "Save". The token is
    stored in Windows Credential Manager, not in any file in this folder.
-4. On the phone web app, open Settings, enter the same owner, repository and
-   token, then "Test connection". The token is stored only in the browser on
-   your phone (never sent anywhere except to GitHub).
+4. On the phone web app (opened from its Home Screen icon on an iPhone), open
+   Settings, enter the same owner, repository and token, then "Test
+   connection". The token is stored only in the browser on your phone (never
+   sent anywhere except to GitHub).
+
+   All GitHub Pages sites of one GitHub account share one browser origin
+   (`yourname.github.io`), so any other Pages site on the same account could
+   read what this web app stores, including the token. Do not host other
+   GitHub Pages sites on this account, or give this one its own custom
+   subdomain. The token itself can only reach the one private `focus-data`
+   repository, so even a leaked token cannot touch anything else you own.
 5. Once both are connected, GitHub becomes the master copy. Box's
    `data\state.json` keeps receiving a write-only backup copy from the
    desktop, so you always have a local file even if GitHub is unreachable,
@@ -174,7 +189,21 @@ Your task names and details are never part of the public `focus-tool` code
 repository. They live only in your private `focus-data` repository, in your
 Box folder, and on your phone. A safety check (`tools/check_public.py`) runs
 before every commit and before every build specifically to make sure nothing
-from your real list ever ends up in the public repository by accident.
+from your real list ever ends up in the public repository by accident. The
+build also runs it with `--history`, which scans every file version and
+commit message in the whole git history, since a name that was committed once
+and deleted later still becomes public when the history is pushed.
+
+The check runs before every commit only once its git hook is installed. Do
+this once on each computer, from this folder:
+
+```
+%LOCALAPPDATA%\FocusTool\venv\Scripts\python.exe tools\install_hooks.py
+```
+
+It copies `tools/pre-commit` into the hooks folder that
+`git rev-parse --git-path hooks` names, which works even though this repo
+keeps its git folder outside Box.
 
 ## Where your data lives
 
@@ -197,8 +226,10 @@ from your real list ever ends up in the public repository by accident.
 Each running copy of the desktop app, while in Box mode, looks at
 `state.json` every 2 seconds and shows changes the other computer saved, as
 soon as Box has brought them over (usually within seconds to a minute). If you
-change the list on both computers before Box has synced, the later save wins,
-and Box may keep the other one as a conflict copy in the same folder. In
+change the list on both computers, the app merges the two lists when it saves,
+task by task, so the edits from both computers are kept. If both computers
+save at the very same moment, before Box has brought either change over, Box
+may still keep one of the files as a conflict copy in the same folder. In
 GitHub mode, syncing happens over the network instead, within a few seconds.
 
 `%APPDATA%\FocusTool\` keeps what belongs to one computer only: `local.json`
@@ -247,9 +278,9 @@ admin rights needed.
   published separately through GitHub Pages.
 - `ops/focus-data/`, the files meant to live in your private `focus-data`
   repository: the nightly planning job and its own README.
-- `tools/check_public.py`, the safety check described above, and
+- `tools/check_public.py`, the safety check described above,
   `tools/pre-commit`, a git hook that runs it automatically before each
-  commit.
+  commit, and `tools/install_hooks.py`, which installs that hook.
 - `tests/`, automated tests for all of the above. Run the Python tests with
   `python -m pytest -q tests`, and the JavaScript tests with
   `node --test tests/js`.

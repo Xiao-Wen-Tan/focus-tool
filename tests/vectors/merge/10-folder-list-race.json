@@ -1,5 +1,5 @@
 {
-  "description": "a's folder list is newer (['Admin']). b's newer version of task t3 uses 'Paper/Theory', so that path and its parent are added after the winning list, sorted. 'Teach' (only in b's older list) is dropped.",
+  "description": "a's folder list is newer (['Admin']). b's newer version of task t3 uses 'Puzzle/Tiles', so that path and its parent are added after the winning list, sorted. 'Tennis' (only in b's older list) is dropped.",
   "a": {
     "version": 3,
     "plan": {
@@ -142,7 +142,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Paper/Theory",
+          "folder": "Puzzle/Tiles",
           "repeat": null,
           "last_done": null,
           "updated_at": "2026-10-12T09:00:00.000Z"
@@ -151,9 +151,9 @@
     },
     "order_updated_at": "1970-01-01T00:00:00.000Z",
     "folders": [
-      "Paper",
-      "Paper/Theory",
-      "Teach"
+      "Puzzle",
+      "Puzzle/Tiles",
+      "Tennis"
     ],
     "folders_updated_at": "2026-10-12T09:00:00.000Z",
     "current_index": 0,
@@ -248,7 +248,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Paper/Theory",
+          "folder": "Puzzle/Tiles",
           "repeat": null,
           "last_done": null,
           "updated_at": "2026-10-12T09:00:00.000Z"
@@ -258,8 +258,8 @@
     "order_updated_at": "1970-01-01T00:00:00.000Z",
     "folders": [
       "Admin",
-      "Paper",
-      "Paper/Theory"
+      "Puzzle",
+      "Puzzle/Tiles"
     ],
     "folders_updated_at": "2026-10-12T10:00:00.000Z",
     "current_index": 0,

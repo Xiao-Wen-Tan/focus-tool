@@ -182,13 +182,13 @@ test("zonedParts gives Chicago wall time and a naive ISO string", () => {
 });
 
 test("rename and delete folder rewrite tasks and the folder list", () => {
-  const doc = core.normalizeDoc({ version: 3, folders: ["Paper", "Paper/Theory", "Home"], plan: { tasks: [
-    { id: "a", name: "Alpha", estimate_min: 5, folder: "Paper/Theory" },
+  const doc = core.normalizeDoc({ version: 3, folders: ["Puzzle", "Puzzle/Tiles", "Home"], plan: { tasks: [
+    { id: "a", name: "Alpha", estimate_min: 5, folder: "Puzzle/Tiles" },
     { id: "b", name: "Beta", estimate_min: 5, folder: "Home" }] } });
-  core.renameFolder(doc, "Paper", "Essay/Draft");
-  assert.deepEqual(doc.folders, ["Essay/Draft", "Essay/Draft/Theory", "Home", "Essay"]);
-  assert.equal(doc.plan.tasks[0].folder, "Essay/Draft/Theory");
-  core.deleteFolder(doc, "Essay");
+  core.renameFolder(doc, "Puzzle", "Easel/Doodle");
+  assert.deepEqual(doc.folders, ["Easel/Doodle", "Easel/Doodle/Tiles", "Home", "Easel"]);
+  assert.equal(doc.plan.tasks[0].folder, "Easel/Doodle/Tiles");
+  core.deleteFolder(doc, "Easel");
   assert.deepEqual(doc.folders, ["Home"]);
   assert.equal(doc.plan.tasks[0].folder, null);
   core.addFolder(doc, "Work/Ideas");

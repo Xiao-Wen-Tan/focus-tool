@@ -238,15 +238,15 @@ def test_an_asleep_repeat_cannot_start(make, clock):
 # ---------- folders ----------
 
 def _folder_tasks():
-    return (fc.Task("Alpha", 10, folder="Paper"), fc.Task("Gamma", 10, folder="Other"),
-            fc.Task("Beta", 10, folder="Paper/Theory"), fc.Task("Delta", 10))
+    return (fc.Task("Alpha", 10, folder="Puzzle"), fc.Task("Gamma", 10, folder="Other"),
+            fc.Task("Beta", 10, folder="Puzzle/Tiles"), fc.Task("Delta", 10))
 
 
 def test_folder_filter_shows_subfolders(make):
     w = make()
     p = _with_tasks(w, *_folder_tasks())
-    assert "10m · Beta   📁 Paper/Theory" in _texts(p.list)
-    p.filter_combo.setCurrentIndex(p.filter_combo.findData("Paper"))
+    assert "10m · Beta   📁 Puzzle/Tiles" in _texts(p.list)
+    p.filter_combo.setCurrentIndex(p.filter_combo.findData("Puzzle"))
     assert _texts(p.list) == ["10m · Alpha", "10m · Beta"]
     p.filter_combo.setCurrentIndex(0)
     assert p.list.count() == 4
@@ -255,7 +255,7 @@ def test_folder_filter_shows_subfolders(make):
 def test_moving_inside_a_filter_keeps_the_hidden_tasks_in_place(make):
     w = make()
     p = _with_tasks(w, *_folder_tasks())
-    p.filter_combo.setCurrentIndex(p.filter_combo.findData("Paper"))
+    p.filter_combo.setCurrentIndex(p.filter_combo.findData("Puzzle"))
     p.list.setCurrentRow(1)
     p.move_selected(-1)
     assert [t.name for t in w.plan.tasks] == ["Beta", "Gamma", "Alpha", "Delta"]
@@ -263,12 +263,12 @@ def test_moving_inside_a_filter_keeps_the_hidden_tasks_in_place(make):
 
 def test_rename_folder_updates_labels(make, shared):
     w = make()
-    w.folders = ["Paper", "Paper/Theory"]
+    w.folders = ["Puzzle", "Puzzle/Tiles"]
     p = _with_tasks(w, *_folder_tasks())
-    w.rename_folder("Paper", "Thesis")
-    assert "10m · Beta   📁 Thesis/Theory" in _texts(p.list)
-    assert "Thesis" in _saved(shared)["folders"] and "Paper" not in _saved(shared)["folders"]
-    w.delete_folder("Thesis")
+    w.rename_folder("Puzzle", "Tinker")
+    assert "10m · Beta   📁 Tinker/Tiles" in _texts(p.list)
+    assert "Tinker" in _saved(shared)["folders"] and "Puzzle" not in _saved(shared)["folders"]
+    w.delete_folder("Tinker")
     assert all(t.folder in (None, "Other") for t in w.plan.tasks)
 
 
@@ -277,12 +277,12 @@ def test_new_folder_from_the_editor(make, monkeypatch):
     w = make()
     p = _with_tasks(w, fc.Task("Alpha", 10))
     p.list.setCurrentRow(0)
-    monkeypatch.setattr(ft.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Paper", True)))
+    monkeypatch.setattr(ft.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Puzzle", True)))
     p.ed_folder.setCurrentIndex(p.ed_folder.findData(ft.NEW_FOLDER))
-    assert w.plan.tasks[0].folder == "Paper" and "Paper" in w.folders
-    monkeypatch.setattr(ft.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Theory", True)))
+    assert w.plan.tasks[0].folder == "Puzzle" and "Puzzle" in w.folders
+    monkeypatch.setattr(ft.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Tiles", True)))
     p.ed_folder.setCurrentIndex(p.ed_folder.findData(ft.NEW_SUBFOLDER))
-    assert w.plan.tasks[0].folder == "Paper/Theory" and "Paper/Theory" in w.folders
+    assert w.plan.tasks[0].folder == "Puzzle/Tiles" and "Puzzle/Tiles" in w.folders
 
 
 # ---------- the shared file ----------

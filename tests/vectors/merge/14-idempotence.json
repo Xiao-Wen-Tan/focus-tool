@@ -12,7 +12,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Paper",
+          "folder": "Puzzle",
           "repeat": null,
           "last_done": null,
           "updated_at": "2026-10-12T10:00:00.000Z"
@@ -34,7 +34,7 @@
     },
     "order_updated_at": "2026-10-12T10:00:00.000Z",
     "folders": [
-      "Paper"
+      "Puzzle"
     ],
     "folders_updated_at": "2026-10-12T10:00:00.000Z",
     "current_index": 0,
@@ -118,7 +118,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Paper",
+          "folder": "Puzzle",
           "repeat": null,
           "last_done": null,
           "updated_at": "2026-10-12T10:00:00.000Z"
@@ -140,7 +140,7 @@
     },
     "order_updated_at": "2026-10-12T10:00:00.000Z",
     "folders": [
-      "Paper"
+      "Puzzle"
     ],
     "folders_updated_at": "2026-10-12T10:00:00.000Z",
     "current_index": 0,
@@ -224,7 +224,7 @@
           "spent_s": 0.0,
           "deadline": null,
           "target": null,
-          "folder": "Paper",
+          "folder": "Puzzle",
           "repeat": null,
           "last_done": null,
           "updated_at": "2026-10-12T10:00:00.000Z"
@@ -246,7 +246,7 @@
     },
     "order_updated_at": "2026-10-12T10:00:00.000Z",
     "folders": [
-      "Paper"
+      "Puzzle"
     ],
     "folders_updated_at": "2026-10-12T10:00:00.000Z",
     "current_index": 0,

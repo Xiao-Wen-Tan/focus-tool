@@ -1,15 +1,17 @@
 name: Replan
 
-# Runs the day plan every night. Two cron times cover both US Central clocks
-# (CDT and CST), since GitHub Actions cron is always UTC and does not shift
-# with daylight saving: 7 0 * * * is 19:07 Central during Central Daylight
-# Time, and 7 1 * * * is 19:07 Central during Central Standard Time. Only one
-# of the two actually lands near 19:00 local on a given day; the planner
-# itself checks the local hour and is a no-op if it is not past 19:00 yet.
+# Runs the day plan every night. GitHub Actions cron is always UTC and does
+# not shift with daylight saving, so three times are listed. "7 0 * * *" is
+# 19:07 Central during Central Daylight Time, and "7 1 * * *" is 19:07 Central
+# during Central Standard Time. "7 2 * * *" is a spare an hour later, because
+# GitHub sometimes delays or drops a scheduled run. The planner itself checks
+# the local hour and does nothing before 19:00, and it also does nothing when
+# tomorrow already has a plan, so only the first run after 19:00 makes one.
 on:
   schedule:
     - cron: "7 0 * * *"
     - cron: "7 1 * * *"
+    - cron: "7 2 * * *"
   workflow_dispatch:
     inputs:
       mode:
