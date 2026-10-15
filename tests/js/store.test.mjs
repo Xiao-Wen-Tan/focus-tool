@@ -232,7 +232,7 @@ test("sync: offline keeps the dirty local doc and reports offline", async () => 
 });
 
 test("sync refuses a newer state file and never writes over it", async () => {
-  const text = JSON.stringify({ version: 5, plan: { tasks: [] } });
+  const text = JSON.stringify({ version: 6, plan: { tasks: [] } });
   const { gh, engine } = setup({ files: { "state.json": text } });
   const r = await engine.sync(doc([task("a", "Alpha")]));
   assert.equal(r.status, "version");

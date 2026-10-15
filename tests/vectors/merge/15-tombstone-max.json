@@ -185,7 +185,7 @@
     "geometry": null
   },
   "expected": {
-    "version": 4,
+    "version": 5,
     "plan": {
       "tasks": [
         {
@@ -200,7 +200,8 @@
           "repeat": null,
           "last_done": null,
           "updated_at": "1970-01-01T00:00:00.000Z",
-          "deadline_time": null
+          "deadline_time": null,
+          "priority": "med"
         },
         {
           "id": "t2",
@@ -214,7 +215,8 @@
           "repeat": null,
           "last_done": null,
           "updated_at": "1970-01-01T00:00:00.000Z",
-          "deadline_time": null
+          "deadline_time": null,
+          "priority": "med"
         }
       ]
     },

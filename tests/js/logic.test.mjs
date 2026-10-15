@@ -14,11 +14,12 @@ test("the page module links (all imports exist) and does nothing without a DOM",
   assert.ok(m._app);
 });
 
-test("addTask puts the new task at the front; repeat keeps the deadline but clears the target; folder is registered", () => {
+test("addTask puts the new task at the end; repeat keeps the deadline but clears the target; folder is registered", () => {
   const d = doc([task("a", "Alpha")]);
   const t = L.addTask(d, { name: "  Write intro ", estimate_min: 25, folder: "Puzzle/Tiles", deadline: "2026-10-16" });
-  assert.deepEqual(names(d), ["Write intro", "Alpha"]);
+  assert.deepEqual(names(d), ["Alpha", "Write intro"]);
   assert.equal(t.estimate_min, 25);
+  assert.equal(t.priority, "med");
   assert.deepEqual(d.folders, ["Puzzle/Tiles", "Puzzle"]);
   const r = L.addTask(d, { name: "Walk", repeat: { kind: "daily" }, deadline: "2026-10-16", target: "2026-10-15" });
   assert.equal(r.deadline, "2026-10-16");
@@ -251,7 +252,7 @@ test("?api= accepts only a local test server", () => {
 });
 
 test("a newer list kept on the phone is blocked and backed up, never replaced", () => {
-  const text = JSON.stringify({ version: 5, plan: { tasks: [{ id: "a", name: "Alpha" }] } });
+  const text = JSON.stringify({ version: 6, plan: { tasks: [{ id: "a", name: "Alpha" }] } });
   const r = L.readLocalDoc(text);
   assert.match(r.block, /newer Focus Tool/);
   assert.deepEqual(r.backup, { key: "focus.doc.backup-newer", text });
@@ -366,4 +367,39 @@ test("renaming a folder moves its notes; deleting it keeps them", () => {
   assert.equal(d.progress[0].folder, "NSF grant/Budget");
   core.deleteFolder(d, "NSF grant");
   assert.equal(d.folder_notes["NSF grant"].text, "Summary");
+});
+
+test("priority tag: set on add and edit, unknown values become Medium, Save sends it only when changed", () => {
+  const d = doc([task("a", "Alpha")]);
+  assert.equal(d.plan.tasks[0].priority, "med");
+  const t = L.addTask(d, { name: "Beta", priority: "high" });
+  assert.equal(t.priority, "high");
+  assert.equal(L.updateTask(d, "a", { priority: "low" }).priority, "low");
+  assert.equal(L.updateTask(d, "a", { priority: "urgent" }).priority, "med");
+  assert.deepEqual(L.changedFields({ name: "A", priority: "med" }, { name: "A", priority: "high" }), { priority: "high" });
+  assert.deepEqual([L.priorityLabel({ priority: "high" }), L.priorityLabel({}), L.priorityLabel({ priority: "low" })],
+    ["High", "Med", "Low"]);
+});
+
+test("My order groups High, Medium, Low and keeps your order inside each tag", () => {
+  const d = doc([task("a", "A", { priority: "low" }), task("b", "B"), task("c", "C", { priority: "high" }), task("e", "E")]);
+  assert.deepEqual(L.myOrder(d.plan.tasks).map((t) => t.name), ["C", "B", "E", "A"]);
+  const [, ranked] = core.displaySections(d.plan.tasks);
+  assert.deepEqual(ranked.map((t) => t.name), ["C", "B", "E", "A"]);
+});
+
+test("a task moves only among the tasks with its tag", () => {
+  const d = doc([task("a", "A", { priority: "low" }), task("b", "B"), task("c", "C", { priority: "high" }), task("e", "E")]);
+  assert.equal(L.moveTask(d, "e", -1), true); // E swaps with B, the Medium task above it
+  assert.deepEqual(names(d), ["A", "E", "C", "B"]);
+  assert.equal(L.moveTask(d, "e", -1), false); // E is already first among the Medium tasks
+  assert.equal(L.moveTask(d, "a", -1), false); // A is the only Low task
+  assert.equal(L.moveRanked(d, "b", -1), true);
+  assert.deepEqual(L.myOrder(d.plan.tasks).map((t) => t.name), ["C", "B", "E", "A"]);
+});
+
+test("the No folder filter shows only the tasks without a folder", () => {
+  const d = doc([task("a", "A", { folder: "Home" }), task("b", "B")]);
+  assert.deepEqual(d.plan.tasks.filter((t) => core.inFolder(t, core.NO_FOLDER)).map((t) => t.name), ["B"]);
+  assert.deepEqual(d.plan.tasks.filter((t) => core.inFolder(t, null)).map((t) => t.name), ["A", "B"]);
 });

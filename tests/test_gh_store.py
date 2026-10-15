@@ -375,3 +375,12 @@ def test_remote_changed_false_when_remote_content_is_unchanged_across_full_fetch
 
     second = engine.sync(local_doc)
     assert second.remote_changed is False
+
+
+def test_protect_token_round_trip_and_plain_fallback():
+    entry = gh.protect_token("secret-token")
+    assert "dpapi" in entry and "secret-token" not in json.dumps(entry)
+    assert gh.unprotect_token(entry) == "secret-token"
+    assert gh.unprotect_token({"plain": "abc"}) == "abc"
+    assert gh.unprotect_token({"dpapi": "bm90IGEgYmxvYg=="}) is None  # not this user's data
+    assert gh.unprotect_token(None) is None and gh.unprotect_token("x") is None

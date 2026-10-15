@@ -16,18 +16,26 @@ automatic day plan that lays your tasks out against your working hours.
 
 2. **Add a task** in the card at the top of the panel: type the name, click a
    time pill (5, 10, 15, 25, 30, 45, 60 or 90 minutes), write details if you
-   like, then "+ Add to list" (or Enter). New tasks go to the front of the
-   list, so what you just added is the next thing you will work on.
+   like, then "+ Add to list" (or Enter). New tasks go to the end of their
+   priority tag, so tasks you entered earlier stay above them.
+
+   Each task has a **priority tag**: Low, Med or High (Med for a new task).
+   Pick it with the Low / Med / High buttons in the task's editor. High and Low
+   tasks show their tag at the start of the row, for example "High · 60m ·
+   Email cleanup"; Med tasks show none.
 
 3. **Your list** has two ways to sort, picked with "Sort" on the desktop and
    the "My order" / "By date" tabs on the phone:
-   - **My order**, every task, dated or not, in the order you put it in. On
-     the desktop, drag a task by the ≡ sign at its left, or use the ↑ ↓ at its
-     right. Pressing a task and dragging it moves it without opening it; a
-     plain click opens it. On the phone, use ↑ ↓ or ⤒ (to the top).
+   - **My order**, every task, dated or not: High tasks first, then Med, then
+     Low, and inside each tag the order you put them in. On the desktop, drag
+     a task by the ≡ sign at its left, or use the ↑ ↓ at its right. Pressing a
+     task and dragging it moves it without opening it; a plain click opens it.
+     On the phone, use ↑ ↓ or ⤒ (to the top of its tag). A task moves only
+     among the tasks with the same tag; to move it to another group, change
+     its tag.
    - **By date**, tasks with a deadline or a target finish date first, the
-     closest date first, for example "Fri 10/16". The rest follow in your
-     order (on the phone they keep their ↑ ↓ ⤒ buttons there).
+     closest date first, for example "Fri 10/16". The rest follow by tag and
+     your order (on the phone they keep their ↑ ↓ ⤒ buttons there).
 
    Click a task and the same card at the top switches to "Selected task",
    where you change its name, time (pills), details, dates, folder or repeat
@@ -85,34 +93,38 @@ automatic day plan that lays your tasks out against your working hours.
 
 ## Dates: deadline and target
 
-A task can have a **deadline** (a hard date it must be done by) and a
-**target** (the date you expect to finish it by, softer than a deadline). Set
-either or both in the editor; leave a date off and the task follows your
-manual order instead.
+A task can have a **deadline** (a hard date) and a **target** (the "aim to
+finish by" date). Set either or both in the editor; leave a date off and the
+task follows its tag and your order instead.
+
+- A **hard date** is a meeting or a scheduled event. The day plan books the
+  task on that day, never earlier.
+- An **aim date** is a date to finish by. The work can be done in advance, and
+  the day plan spreads it over the days before.
 
 The two kinds look different in the list, on the desktop, on the phone and in
 the day plan. A hard deadline shows as "📅 Due Fri 10/16" in red, a target as
 "🎯 Aim Mon 10/19" in the normal colour, and a task with both as
 "📅 Due Fri 10/16, 🎯 aim Wed 10/14".
 
-A deadline can also have a time of day, for example 5pm. Type it in the small
-box next to the deadline date (5pm, 5:30pm and 17:00 all work), or leave it
-empty to mean the end of that day. The list then shows "📅 Due Fri 10/16
-5:00pm". The day plan counts the task as overdue from that minute, and on the
-deadline day itself it only plans work on it before that time. A target date
-has no time, and neither does a repeating task's deadline (it only says the
-last day it repeats).
+A deadline can also have a time of day, for example 2pm. Type it in the small
+box next to the deadline date (2pm, 2:30pm and 14:00 all work), or leave it
+empty if the task only has a date. The list then shows "📅 Due Fri 10/16
+2:00pm", and the day plan books the task at exactly 2:00pm for its minutes,
+even outside your working hours. A target date has no time, and neither does a
+repeating task's deadline (it only says the last day it repeats).
 
-The day plan (below) finishes dated tasks two business days (Monday to
-Friday) before the date itself, so you are never racing the actual deadline.
-If a task has both a deadline and a target, the deadline wins.
+The day plan (below) aims to finish aim-date tasks two business days (Monday
+to Friday) before the date itself, so you are never racing the date. If a task
+has both a deadline and a target, the deadline wins.
 
 ## Folders
 
 Folders are labels, and can have subfolders, for example
 "Garden/Seeds". Give a task a folder in the editor. Use the folder picker above
-the list to show only one folder and its subfolders at a time, or "All
-folders" to see everything. There is one single order across all folders;
+the list to show only one folder and its subfolders at a time, "No folder" to
+see only the tasks without a folder, or "All folders" (on the desktop, "All
+tasks") to see everything. There is one single order across all folders;
 folders only filter what you see, they do not change the order itself.
 Folders cannot have their own dates. Use "Folders..." to rename or delete a
 folder; deleting one leaves its tasks without a folder, it does not delete the
@@ -169,6 +181,28 @@ tray menu, and click the button again to close it. It shows warnings if
 something will not fit before its date. Double-click a time block to start
 its task. The window remembers its size and position on each computer.
 
+The plan fills a day in this order:
+
+1. Tasks with a hard date and a time, at exactly that time (a meeting at 14:00
+   for 60 minutes is booked 14:00 to 15:00). If two of them overlap, both stay
+   and the plan shows a warning.
+2. Tasks with a hard date and no time, on that day, as early as they fit
+   (High before Med before Low). If one does not fit on its day, the plan
+   warns.
+3. Overdue work: a hard date that has passed, and aim-date work that is too
+   close to its date.
+4. Repeating tasks due that day.
+5. Aim-date work, pulled ahead into free time: High before Med before Low,
+   then your order.
+6. Tasks with no date: High before Med before Low, then your order.
+
+For example, with the hours 9:00 to 12:00 and 13:30 to 18:00, a 60 minute
+meeting at 14:00, a 30 minute form due today, a 120 minute Low report to aim
+for by Friday, a 60 minute High "Email cleanup" with no date and a 60 minute
+Med "Read paper" with no date give: form 9:00 to 9:30, report 9:30 to 11:30,
+email 11:30 to 12:00 and 13:30 to 14:00, meeting 14:00 to 15:00, read 15:00
+to 16:00.
+
 You do not have to wait for the evening job. A **Re-plan now** button is
 available on both the phone and the desktop. Before 7 pm it plans the rest of
 today starting from right now, and after 7 pm it plans tomorrow.
@@ -221,7 +255,12 @@ working exactly as before, saving to the `data` folder inside Box.
 3. On the desktop, open the tray menu and choose "GitHub sync...". Enter the
    repository owner (your GitHub username), the repository name
    (`focus-data`), and paste the token, then "Test" and "Save". The token is
-   stored in Windows Credential Manager, not in any file in this folder.
+   stored in Windows Credential Manager, and a copy goes in this computer's
+   settings file (`%APPDATA%\FocusTool\local.json`), encrypted so only your
+   Windows account can read it. Some computers drop the Credential Manager
+   entry after a restart; the copy keeps the app connected. It is never put in
+   this folder, in Box or on GitHub. If neither copy can be found, the panel
+   says "GitHub key missing" in red.
 4. On the phone web app (opened from its Home Screen icon on an iPhone), open
    Settings, enter the same owner, repository and token, then "Test
    connection". The token is stored only in the browser on your phone (never

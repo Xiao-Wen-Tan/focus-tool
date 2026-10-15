@@ -2,7 +2,7 @@
 // Page code only; the rules live in core.js (shared with the desktop) and logic.js (button actions).
 import {
   canonical, clone, mergeDocs, stampChanges, nowIso, displaySections, nextDueDay, inFolder,
-  folderTree, isActive, renameFolder, deleteFolder, addFolder, timerView, WEEKDAY_KEYS, addDays,
+  folderTree, isActive, renameFolder, deleteFolder, addFolder, timerView, WEEKDAY_KEYS, addDays, NO_FOLDER,
 } from "./core.js";
 import { GitHubStore, SyncEngine, fetchDayPlan } from "./store.js";
 import {
@@ -11,10 +11,10 @@ import {
   addMinutes, finishTaskNow, removeTask, removeExpiredRepeats, putBack, clearDone, moveRanked, moveRankedToTop, moveTask, moveTaskToTop, setWindows,
   windowsText, timelineSegments, minToHm, stampToLocalHm, parseApiOverride, readLocalDoc, replanBlockMessage,
   syncPauseUntil, changedFields, authPauseAfterSync, authPauseAfterSave, mayAutoSync, blockDateText,
-  folderNotesText, setFolderNotes, progressFor, addProgress, editProgress, deleteProgress,
+  folderNotesText, setFolderNotes, progressFor, addProgress, editProgress, deleteProgress, myOrder, priorityLabel,
 } from "./logic.js";
 
-const APP_VERSION = "2.2.0";
+const APP_VERSION = "2.3.0";
 const KEY_DOC = "focus.doc";
 const KEY_SETTINGS = "focus.settings";
 const KEY_UI = "focus.ui";
@@ -520,9 +520,14 @@ function tick() {
 
 // ---------------------------------------------------------------- List tab
 
+const NO_FOLDER_VALUE = "__none__"; // the folder filter's "No folder" choice
+
 function folderOptions(selected, { all = true, none = false, extra = [] } = {}) {
   const opts = [];
-  if (all) opts.push(h("option", { value: "", selected: selected == null }, "All folders"));
+  if (all) {
+    opts.push(h("option", { value: "", selected: selected == null }, "All folders"));
+    opts.push(h("option", { value: NO_FOLDER_VALUE, selected: selected === NO_FOLDER }, "No folder"));
+  }
   if (none) opts.push(h("option", { value: "", selected: selected == null }, "No folder"));
   for (const [path, depth] of folderTree(app.doc.folders, app.doc.plan.tasks)) {
     const name = path.split("/").pop();
@@ -540,7 +545,8 @@ function taskRow(t, { ranked, anyOrder = false, visibleIds, today }) {
   if (t.folder && app.ui.folder == null) sub.push(t.folder);
   if (t.details.trim()) sub.push(t.details.trim().split("\n")[0]);
   const main = h("button", { type: "button", class: "row-main", onclick: () => openEditor(t.id) },
-    h("span", { class: "row-label" }, rowLabel(app.doc, t, today)),
+    h("span", { class: "row-label" }, ...(t.priority === "high" || t.priority === "low" // Medium, the default, has no tag
+      ? [h("span", { class: `tag tag-${t.priority}` }, priorityLabel(t)), " "] : []), rowLabel(app.doc, t, today)),
     sub.length ? h("span", { class: "row-sub" }, sub.join("  ·  ")) : null);
   // My order moves every task; By date moves only the undated ones (the dates order the rest).
   const move = anyOrder ? moveTask : moveRanked, toTop = anyOrder ? moveTaskToTop : moveRankedToTop;
@@ -556,10 +562,10 @@ function taskRow(t, { ranked, anyOrder = false, visibleIds, today }) {
 function viewList() {
   const doc = app.doc;
   const today = now().day;
-  const filter = app.ui.folder && folderTree(doc.folders, doc.plan.tasks).some(([p]) => p === app.ui.folder) ? app.ui.folder : null;
+  const filter = app.ui.folder === NO_FOLDER || (app.ui.folder && folderTree(doc.folders, doc.plan.tasks).some(([p]) => p === app.ui.folder)) ? app.ui.folder : null;
   const byDate = app.ui.sort === "date";
   const select = h("select", { class: "folder-filter", "aria-label": "Show folder", onchange: (e) => {
-    app.ui.folder = e.target.value || null;
+    app.ui.folder = e.target.value === NO_FOLDER_VALUE ? NO_FOLDER : e.target.value || null;
     save(KEY_UI, app.ui);
     render();
   } }, ...folderOptions(filter));
@@ -571,14 +577,15 @@ function viewList() {
         { "aria-pressed": on ? "true" : "false" });
     }));
   const out = h("div", { class: "list" }, head, sortTabs);
-  if (filter) out.append(notesCard(filter));
-  const hint = h("p", { class: "hint" }, "Tap a task to edit, start or finish it. New tasks go to the top.");
+  if (filter && filter !== NO_FOLDER) out.append(notesCard(filter));
+  const empty = filter === NO_FOLDER ? "Every task is in a folder." : filter ? "No tasks in this folder." : "No tasks yet. Tap + Add.";
+  const hint = h("p", { class: "hint" }, "Tap a task to edit, start or finish it. Tasks go High, then Med, then Low. New tasks go to the bottom of their tag, and the arrows move a task within its tag.");
   if (!byDate) {
-    const shown = doc.plan.tasks.filter((t) => inFolder(t, filter));
+    const shown = myOrder(doc.plan.tasks.filter((t) => inFolder(t, filter)));
     const visibleIds = shown.map((t) => t.id);
     out.append(card("My order", shown.length
       ? h("ul", { class: "rows" }, shown.map((t) => taskRow(t, { ranked: true, anyOrder: true, visibleIds, today })))
-      : h("p", { class: "empty" }, filter ? "No tasks in this folder." : "No tasks yet. Tap + Add."), hint));
+      : h("p", { class: "empty" }, empty), hint));
     return out;
   }
   const [dated, ranked] = displaySections(doc.plan.tasks, today);
@@ -588,9 +595,9 @@ function viewList() {
   if (shownDated.length) {
     out.append(card("📅 By date", h("ul", { class: "rows" }, shownDated.map((t) => taskRow(t, { ranked: false, today })))));
   }
-  out.append(card("No date, in your order", shownRanked.length
+  out.append(card("No date, by tag and your order", shownRanked.length
     ? h("ul", { class: "rows" }, shownRanked.map((t) => taskRow(t, { ranked: true, visibleIds, today })))
-    : h("p", { class: "empty" }, filter ? "No tasks in this folder." : "No tasks yet. Tap + Add."), hint));
+    : h("p", { class: "empty" }, empty), hint));
   return out;
 }
 
@@ -656,11 +663,14 @@ function openEditor(id) {
   const today = now().day;
   const t = existing ? clone(existing) : {
     name: "", estimate_min: DEFAULT_MINUTES, details: "", deadline: null, target: null,
-    folder: app.ui.folder || null, repeat: null, deadline_time: null,
+    folder: app.ui.folder && app.ui.folder !== NO_FOLDER ? app.ui.folder : null, repeat: null, deadline_time: null,
+    priority: "med",
   };
   const form = { ...t, repeat: t.repeat ? clone(t.repeat) : null };
   const opened = clone({ name: t.name, estimate_min: t.estimate_min, details: t.details, deadline: t.deadline,
-    target: t.target, folder: t.folder, repeat: t.repeat, deadline_time: t.deadline_time ?? null }); // to save only what the user changed
+    target: t.target, folder: t.folder, repeat: t.repeat, deadline_time: t.deadline_time ?? null,
+    priority: t.priority || "med" }); // to save only what the user changed
+  if (!form.priority) form.priority = "med";
 
   const name = h("input", { type: "text", class: "input", placeholder: "What is the task?", value: form.name, enterkeyhint: "done", "aria-label": "Task name" });
   name.addEventListener("input", () => { form.name = name.value; });
@@ -675,12 +685,21 @@ function openEditor(id) {
   };
   drawPills();
 
+  const prio = h("div", { class: "pills", role: "group", "aria-label": "Priority" });
+  const drawPrio = () => {
+    prio.replaceChildren(...[["low", "Low"], ["med", "Med"], ["high", "High"]].map(([v, label]) => h("button", {
+      type: "button", class: `pill${v === form.priority ? " on" : ""}`, "aria-pressed": v === form.priority ? "true" : "false",
+      onclick: () => { form.priority = v; drawPrio(); },
+    }, label)));
+  };
+  drawPrio();
+
   const details = h("textarea", { class: "input", rows: "4", placeholder: "Details (optional). The first step, a link, what done looks like.", "aria-label": "Details" });
   details.value = form.details || "";
   details.addEventListener("input", () => { form.details = details.value; });
 
   // dates
-  const timeInput = h("input", { type: "time", class: "input time", value: form.deadline_time || "", "aria-label": "Deadline time (optional)", title: "The time of day the deadline falls at. Leave it empty for the end of the day." });
+  const timeInput = h("input", { type: "time", class: "input time", value: form.deadline_time || "", "aria-label": "Deadline time (optional)", title: "The time it starts, for a meeting or event. The day plan books it at this time. Leave it empty if it only has a date." });
   timeInput.addEventListener("change", () => { form.deadline_time = timeInput.value || null; });
   const drawTime = () => {
     timeInput.hidden = !form.deadline || Boolean(form.repeat); // only a hard deadline has a time
@@ -780,7 +799,7 @@ function openEditor(id) {
   const collect = () => {
     const f = {
       name: form.name, estimate_min: form.estimate_min, details: form.details, folder: form.folder,
-      repeat: form.repeat, deadline: form.deadline, target: form.repeat ? null : form.target,
+      repeat: form.repeat, deadline: form.deadline, target: form.repeat ? null : form.target, priority: form.priority,
       deadline_time: form.deadline && !form.repeat ? form.deadline_time || null : null,
     };
     if (f.repeat && f.repeat.kind === "days" && !(f.repeat.days || []).length) {
@@ -833,7 +852,7 @@ function openEditor(id) {
     h("div", { class: "sheet-grip", "aria-hidden": "true" }),
     h("h2", { class: "card-title" }, existing ? "Edit task" : "Add a task"),
     asleep ? h("p", { class: "hint" }, `${sleepText(existing, today)}. Done for today.`) : null,
-    name, pills, details,
+    name, pills, field("Priority", prio), details,
     field("Repeat", repeatSel), repeatExtra,
     dates, datesNote,
     field("Folder", folderSel), newFolderBox,
@@ -870,7 +889,7 @@ function viewDone() {
 // ---------------------------------------------------------------- Plan tab
 
 const PX_PER_MIN = 2;
-const KIND_LABEL = { urgent: "Urgent", dated: "Dated", ranked: "Your order", ahead: "Ahead" };
+const KIND_LABEL = { fixed: "Fixed time", urgent: "Urgent", dated: "Hard date", ranked: "No date", ahead: "Ahead" };
 
 function viewPlan() {
   const doc = app.doc;

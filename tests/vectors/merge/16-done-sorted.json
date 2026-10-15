@@ -175,7 +175,7 @@
     "geometry": null
   },
   "expected": {
-    "version": 4,
+    "version": 5,
     "plan": {
       "tasks": []
     },

@@ -113,22 +113,24 @@ test("roundHalfEven matches Python round", () => {
   assert.deepEqual([0.5, 1.5, 2.5, 3.5, 2.4, 2.6].map(core.roundHalfEven), [0, 2, 2, 4, 2, 3]);
 });
 
-test("normalizeDoc refuses version 2 and version 5, fills a v3 doc and gives it the version 4 fields", () => {
+test("normalizeDoc refuses version 2 and version 6, fills a v3 doc and gives it the version 4 and 5 fields", () => {
   assert.throws(() => core.normalizeDoc({ version: 2 }), core.VersionError);
-  assert.throws(() => core.normalizeDoc({ version: 5 }), core.VersionError);
-  assert.equal(core.normalizeDoc({ version: 4 }).version, 4);
+  assert.throws(() => core.normalizeDoc({ version: 6 }), core.VersionError);
+  assert.equal(core.normalizeDoc({ version: 4 }).version, 5);
+  assert.equal(core.normalizeDoc({ version: 5 }).version, 5);
   assert.throws(() => core.normalizeDoc({}), core.VersionError);
   assert.throws(() => core.normalizeDoc({ version: null }), /unreadable/);
   const d = core.normalizeDoc({ version: 3, plan: { tasks: [{ id: "a", name: "Alpha", estimate_min: 5 }] }, done: [{ id: "x", name: "Beta", estimate_min: 5, actual_min: 4 }] });
-  assert.equal(d.version, 4);
+  assert.equal(d.version, 5);
   assert.equal(d.plan.tasks[0].deadline_time, null);
+  assert.equal(d.plan.tasks[0].priority, "med");
   assert.deepEqual([d.folder_notes, d.progress], [{}, []]);
   assert.equal(d.plan.tasks[0].spent_s, 0);
   assert.equal(d.plan.tasks[0].updated_at, core.EPOCH);
   assert.equal(d.done[0].finished_at, "");
   assert.equal(d.planner.tz, "America/Chicago");
   assert.deepEqual(d.planner.windows.sat, ["10:00-12:30"]);
-  assert.throws(() => core.mergeDocs({ version: 5 }, core.emptyDoc()), core.VersionError);
+  assert.throws(() => core.mergeDocs({ version: 6 }, core.emptyDoc()), core.VersionError);
 });
 
 test("finishTask keeps the task id; a repeat goes through completeRepeat", () => {

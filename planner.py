@@ -1,20 +1,25 @@
 """Day planner for the Focus Tool. Pure logic (standard library plus focus_core), no Qt.
 
 It turns the task list in state.json into a plan for one day (day-plan.json). The plan has time blocks
-inside the working hours in the `planner` block of state.json, an outlook of dated work reserved for later
-days, and warnings about dates that are at risk.
+inside the working hours in the `planner` block of state.json (a fixed-time task may fall outside them), an
+outlook of dated work reserved for later days, and warnings about dates that are at risk.
 
-How a day is planned (contracts.md section 4):
+A hard date (deadline) is a meeting or scheduled event: the task happens on that day, not before. An aim
+date (target) is a date to finish by, and the work can be done in advance. Each task has a priority tag,
+High, Medium or Low; inside the same tag, the task higher in the list (entered earlier) goes first.
+
+How a day is planned:
 1. Work out the minutes left per task (estimate minus time already used) and skip tasks with none left.
-2. Urgent work. Dated tasks whose finish-by day (the date minus 2 working days) is already past go first.
-3. Hard pass. Deadline tasks are reserved as late as possible before their finish-by day.
-   A deadline with a time of day (deadline_time) is passed from that minute, and on the deadline day
-   itself the task only gets time before it.
-4. Soft pass. Tasks with a target date ("aim to finish by") are reserved the same way in what is left.
-5. Ranked pass. Undated tasks (and repeating tasks active that day) fill the plan day in list order.
-   A repeating task is always planned as a repeat, never as dated work. If it has a deadline, that is the
-   last day it repeats, so it gets its block only on days it is active up to and including the deadline.
-6. Ahead pass. Any free time left on the plan day pulls dated work forward from its latest reserved day.
+2. Fixed time. A hard date with a time of day (deadline_time) is booked at exactly that time for its
+   minutes, even outside working hours. Two that overlap are both kept, with a warning.
+3. Hard date only. A hard date without a time is booked on that day only, as early as it fits.
+4. Urgent work. A hard date already past, then aim dates whose finish-by day (the date minus 2 working
+   days) is already past, go as early as possible from the plan day on.
+5. Soft pass. Aim-date tasks are reserved as late as possible before their finish-by day.
+6. Repeating tasks active that day fill the plan day, High before Medium before Low, then list order.
+   A repeating task's deadline is the last day it repeats, not an event.
+7. Ahead pass. Free time left on the plan day pulls aim-date work forward from its latest reserved day.
+8. Undated tasks fill what is left, High before Medium before Low, then list order.
 
 Command line, as used by the GitHub Actions job and for testing:
     python planner.py --state state.json --out day-plan.json --mode auto|now|tomorrow [--now ISO-UTC]
@@ -44,7 +49,7 @@ except ImportError:  # pragma: no cover (Python 3.8 and older is not supported)
 PLAN_VERSION = 1
 EVENING_HOUR = 19  # from 7 pm on, "auto" and "now" plan tomorrow
 MAX_DAYS = 366  # how far ahead overflowing work may be placed
-_KIND_RANK = {"urgent": 0, "dated": 1, "ranked": 2, "ahead": 3}  # which kind a merged block keeps
+_KIND_RANK = {"fixed": 0, "urgent": 1, "dated": 2, "ranked": 3, "ahead": 4}  # which kind a merged block keeps
 
 
 # ---------------------------------------------------------------- small helpers
@@ -161,19 +166,16 @@ class _Calendar:
                         self.take_asap(d, mins)
         return self.free[d]
 
-    def total(self, d: date, until: Optional[int] = None) -> int:
-        """Free minutes on day `d`, only those before minute `until` when it is given."""
-        end = 24 * 60 if until is None else until
-        return sum(max(0, min(e, end) - s) for s, e in self.day(d))
+    def total(self, d: date) -> int:
+        """Free minutes on day `d`."""
+        return sum(e - s for s, e in self.day(d))
 
-    def take_asap(self, d: date, need: int, until: Optional[int] = None) -> list:
-        """Take up to `need` minutes from the start of day `d`, none after minute `until` when it is given.
-        Returns the [start, end] pieces taken."""
-        end = 24 * 60 if until is None else until
+    def take_asap(self, d: date, need: int) -> list:
+        """Take up to `need` minutes from the start of day `d`. Returns the [start, end] pieces taken."""
         got, ivs = [], self.day(d)
-        while need > 0 and ivs and ivs[0][0] < end:
+        while need > 0 and ivs:
             s, e = ivs[0]
-            n = min(need, min(e, end) - s)
+            n = min(need, e - s)
             got.append((s, s + n))
             need -= n
             if s + n >= e:
@@ -182,31 +184,32 @@ class _Calendar:
                 ivs[0][0] = s + n
         return got
 
-    def take_alap(self, d: date, need: int, until: Optional[int] = None) -> list:
-        """Take up to `need` minutes from the end of day `d` (from minute `until` back, when it is given)."""
-        end = 24 * 60 if until is None else until
+    def take_alap(self, d: date, need: int) -> list:
+        """Take up to `need` minutes from the end of day `d`."""
         got, ivs = [], self.day(d)
-        i = len(ivs) - 1
-        while need > 0 and i >= 0:
-            s, e = ivs[i]
-            top = min(e, end)
-            if top <= s:
-                i -= 1
-                continue
-            n = min(need, top - s)
-            got.append((top - n, top))
+        while need > 0 and ivs:
+            s, e = ivs[-1]
+            n = min(need, e - s)
+            got.append((e - n, e))
             need -= n
-            if top < e:  # the part after `until` stays free
-                ivs.insert(i + 1, [top, e])
-            if top - n <= s:
-                ivs.pop(i)
+            if e - n <= s:
+                ivs.pop()
             else:
-                ivs[i][1] = top - n
-            i -= 1
+                ivs[-1][1] = e - n
         return got
 
     def release(self, d: date, s: int, e: int) -> None:
         self.free[d] = _normalize(self.day(d) + [[s, e]])
+
+    def block(self, d: date, s: int, e: int) -> None:
+        """Take minutes `s` to `e` of day `d` out of the free time, whether they were free or not."""
+        out = []
+        for a, b in self.day(d):
+            if a < s:
+                out.append([a, min(b, s)])
+            if b > e:
+                out.append([max(a, e), b])
+        self.free[d] = _normalize(out)
 
 
 # ---------------------------------------------------------------- planning one day
@@ -216,13 +219,13 @@ class _Job:
 
     def __init__(self, task, index: int, minutes: int, buffer_days: int):
         self.task, self.index, self.minutes = task, index, minutes
+        self.prio = fc.priority_rank(task)
         # A repeating task's deadline only says when it stops repeating, so it is planned as undated work.
         self.deadline = date.fromisoformat(task.deadline) if task.deadline and not task.repeat else None
-        self.target = date.fromisoformat(task.target) if task.target and not task.repeat else None
-        if self.deadline and self.target and self.target > self.deadline:
-            self.target = None  # a target later than the deadline adds nothing
-        self.cut = fc.parse_hm(task.deadline_time) if self.deadline else None  # minute the deadline falls at
-        self.fb_dead = fc.finish_by(self.deadline, buffer_days) if self.deadline else None
+        # A hard date wins over an aim date: the task is booked on its hard date, so the aim date adds nothing.
+        self.target = (date.fromisoformat(task.target) if task.target and not task.repeat and not self.deadline
+                       else None)
+        self.cut = fc.parse_hm(task.deadline_time) if self.deadline else None  # the minute a fixed-time task starts
         self.fb_tgt = fc.finish_by(self.target, buffer_days) if self.target else None
         self.slots = []  # one dict per slot with day, s, e, kind and date_kind
 
@@ -231,16 +234,9 @@ class _Job:
         return bool(self.deadline or self.target)
 
     @property
-    def min_fb(self) -> date:
-        return min(d for d in (self.fb_dead, self.fb_tgt) if d)
-
-    @property
-    def placed(self) -> int:
-        return sum(x["e"] - x["s"] for x in self.slots)
-
-    def until(self, d: date) -> Optional[int]:
-        """The minute work must stop on day `d`: the deadline time on the deadline day, else None."""
-        return self.cut if d == self.deadline else None
+    def fixed(self) -> bool:
+        """A hard date with a time of day: a meeting or other event, booked at exactly that time."""
+        return self.deadline is not None and self.cut is not None
 
     @property
     def main_kind(self) -> str:
@@ -256,7 +252,7 @@ def _place_alap(cal: _Calendar, job: _Job, need: int, last: date, kind: str, dat
     """Reserve up to `need` minutes as late as possible, from the end of `last` back to the plan day."""
     got, d = 0, last
     while got < need and d >= cal.plan_day:
-        got += job.add(d, cal.take_alap(d, need - got, job.until(d)), kind, date_kind)
+        got += job.add(d, cal.take_alap(d, need - got), kind, date_kind)
         d -= timedelta(days=1)
     return got
 
@@ -267,13 +263,13 @@ def _place_asap(cal: _Calendar, job: _Job, need: int, first: date, last: date, k
     got, d = 0, max(first, cal.plan_day)
     last = min(last, cal.last_day)
     while got < need and d <= last:
-        got += job.add(d, cal.take_asap(d, need - got, job.until(d)), kind, date_kind)
+        got += job.add(d, cal.take_asap(d, need - got), kind, date_kind)
         d += timedelta(days=1)
     return got
 
 
 def _fmt_when(job: _Job, d: date, kind: str) -> str:
-    """The day for a warning, with the deadline time when it has one: "Fri 10/16 5:00pm"."""
+    """The day for a warning, with the time when it has one: "Fri 10/16 5:00pm"."""
     if kind == "deadline" and job.cut is not None:
         return f"{_fmt_day(d)} {fc.fmt_hm(job.task.deadline_time)}"
     return _fmt_day(d)
@@ -303,8 +299,6 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
         m = remaining_minutes(t, timer, now_local)
         if m > 0:
             jobs.append(_Job(t, i, m, buffer_days))
-    dated = [j for j in jobs if j.dated]
-    ranked = [j for j in jobs if not j.dated]
     repeats = [(t, t.estimate_min) for t in state.plan.tasks
                if t.repeat and t.estimate_min > 0]
 
@@ -312,84 +306,96 @@ def plan_day(state, day: date, start: Optional[time], cfg: dict, now_local: Opti
     capacity = cal.total(day)
     first_free = cal.day(day)[0][0] if cal.day(day) else (start_min or 0)
     warnings = []
+    order = lambda j: (j.prio, j.index)  # noqa: E731  High before Medium before Low, then list order
 
-    # 2. Urgent work comes first, because its finish-by day is already past.
-    urgent = [j for j in dated if j.min_fb < day]
-    for j in urgent:
-        opts = [(fb, d, k) for fb, d, k in ((j.fb_dead, j.deadline, "deadline"), (j.fb_tgt, j.target, "target"))
-                if fb]
-        j.trigger = min(opts, key=lambda o: (o[0], o[2] != "deadline"))
-    urgent.sort(key=lambda j: (j.deadline is None, j.trigger[1], j.index))
-    for j in urgent:
-        _, when, k = j.trigger
-        _place_asap(cal, j, j.minutes, day, cal.last_day, "urgent", k)
-        passed_today = (k == "deadline" and when == day and j.cut is not None and start_min is not None
-                        and start_min >= j.cut)
-        if when < day or passed_today:
-            warnings.append(_warn(j, "overdue", f"its {k} {_fmt_when(j, when, k)} has passed"))
+    # Overdue: a hard date already past, or a fixed time already over today. It goes first, as soon as possible.
+    def overdue(j: _Job) -> bool:
+        if j.deadline is None:
+            return False
+        if j.deadline < day:
+            return True
+        return (j.deadline == day and j.fixed and start_min is not None
+                and start_min >= min(24 * 60, j.cut + j.minutes))
+    late = sorted([j for j in jobs if overdue(j)], key=lambda j: (j.deadline, j.prio, j.index))
+
+    # 2. Fixed-time tasks are booked at exactly their time on their day, even outside working hours.
+    booked = {}  # day -> [(start, end, job)] of fixed-time tasks, to notice two that overlap
+    for j in sorted([j for j in jobs if j.fixed and j not in late], key=lambda j: (j.deadline, j.cut, j.index)):
+        if j.deadline > cal.last_day:
+            continue
+        s, e = j.cut, min(24 * 60, j.cut + j.minutes)
+        if j.deadline == day and start_min is not None:
+            s = max(s, start_min)  # it has started already: book what is left of it
+        for s2, e2, other in booked.get(j.deadline, []):
+            if s < e2 and s2 < e:
+                warnings.append(_warn(j, "overlap", f"overlaps {other.task.name} at "
+                                                    f"{_fmt_when(j, j.deadline, 'deadline')}"))
+        booked.setdefault(j.deadline, []).append((s, e, j))
+        cal.block(j.deadline, s, e)
+        j.add(j.deadline, [(s, e)], "fixed", "deadline")
+
+    # 3. Tasks with a hard date and no time are booked on that day only, never earlier.
+    for j in sorted([j for j in jobs if j.deadline and not j.fixed and j not in late],
+                    key=lambda j: (j.deadline, j.prio, j.index)):
+        if j.deadline > cal.last_day:
+            continue
+        got = j.add(j.deadline, cal.take_asap(j.deadline, j.minutes), "dated", "deadline")
+        short = j.minutes - got
+        if short > 0:
+            warnings.append(_warn(j, "deadline_missed",
+                                  f"needs {short} min more than fits on its date {_fmt_day(j.deadline)}", short))
+
+    # 4. Urgent work: overdue hard dates, then aim dates whose finish-by day (the date minus the buffer of
+    # working days) is already past. Each goes as early as possible from the plan day on.
+    aims = [j for j in jobs if j.target]
+    urgent_aims = sorted([j for j in aims if j.fb_tgt < day], key=lambda j: (j.target, j.prio, j.index))
+    for j in late:
+        _place_asap(cal, j, j.minutes, day, cal.last_day, "urgent", "deadline")
+        warnings.append(_warn(j, "overdue", f"its date {_fmt_when(j, j.deadline, 'deadline')} has passed"))
+    for j in urgent_aims:
+        _place_asap(cal, j, j.minutes, day, cal.last_day, "urgent", "target")
+        if j.target < day:
+            warnings.append(_warn(j, "overdue", f"its aim date {_fmt_day(j.target)} has passed"))
         else:
             warnings.append(_warn(j, "in_buffer",
-                                  f"inside the {buffer_days} working days before its {k} {_fmt_when(j, when, k)}"))
-    rest = [j for j in dated if j not in urgent]
+                                  f"inside the {buffer_days} working days before its aim date {_fmt_day(j.target)}"))
 
-    # 3. Hard pass. Deadline tasks go latest finish-by day first, each as late as possible.
-    hard = sorted([j for j in rest if j.deadline], key=lambda j: (j.fb_dead, -j.index), reverse=True)
-    for j in hard:
-        got = _place_alap(cal, j, j.minutes, j.fb_dead, "dated", "deadline")
-        if got < j.minutes:
-            more = _place_asap(cal, j, j.minutes - got, j.fb_dead + timedelta(days=1), j.deadline,
-                               "dated", "deadline")
-            if more:
-                warnings.append(_warn(j, "uses_buffer",
-                                      f"uses the {buffer_days} buffer days before its deadline "
-                                      f"{_fmt_day(j.deadline)}"))
-            short = j.minutes - got - more
-            if short > 0:
-                warnings.append(_warn(j, "deadline_missed",
-                                      f"needs {short} min more than fits before "
-                                      f"{_fmt_when(j, j.deadline, 'deadline')}", short))
-
-    # 4. Soft pass. Target dates go latest finish-by day first. A task that also has a deadline gives its
-    # deadline slots back first, so moving it earlier can only help; what does not fit before the target
-    # goes back as early as possible after it, which those freed slots always cover.
-    soft = sorted([j for j in rest if j.target], key=lambda j: (j.fb_tgt, -j.index), reverse=True)
-    for j in soft:
-        need = j.minutes
-        if j.deadline:
-            for x in j.slots:
-                cal.release(x["day"], x["s"], x["e"])
-            need = j.placed
-            j.slots = []
-        got = _place_alap(cal, j, need, j.fb_tgt, "dated", "target")
-        short = need - got
+    # 5. Soft pass. Aim dates go latest finish-by day first, each as late as possible before it; what does
+    # not fit goes as early as possible after it.
+    for j in sorted([j for j in aims if j not in urgent_aims], key=lambda j: (j.fb_tgt, -j.index), reverse=True):
+        got = _place_alap(cal, j, j.minutes, j.fb_tgt, "dated", "target")
+        short = j.minutes - got
         if short > 0:
             warnings.append(_warn(j, "target_missed",
                                   f"needs {short} min more than fits {buffer_days} working days before "
-                                  f"its target {_fmt_day(j.target)}", short))
-            last = j.deadline if j.deadline else cal.last_day
-            _place_asap(cal, j, short, j.fb_tgt + timedelta(days=1), last, "dated",
-                        "deadline" if j.deadline else "target")
+                                  f"its aim date {_fmt_day(j.target)}", short))
+            _place_asap(cal, j, short, j.fb_tgt + timedelta(days=1), cal.last_day, "dated", "target")
 
-    # 5. Ranked pass. Undated tasks fill the plan day in list order.
-    for j in ranked:
+    # 6. Repeating tasks due that day.
+    for j in sorted([j for j in jobs if j.task.repeat], key=order):
         j.add(day, cal.take_asap(day, j.minutes), "ranked", None)
 
-    # 6. Ahead pass. Free time left today pulls dated work forward from its latest reserved day.
-    for j in sorted(dated, key=lambda j: (j.min_fb, j.deadline is None, j.index)):
-        while cal.total(day, j.until(day)) > 0:
+    # 7. Ahead pass. Free time left on the plan day pulls aim-date work forward from its latest reserved day,
+    # urgent work first, then High before Medium before Low, then list order.
+    for j in sorted(aims, key=lambda j: (j not in urgent_aims, j.prio, j.index)):
+        while cal.total(day) > 0:
             future = [x for x in j.slots if x["day"] > day]
             if not future:
                 break
             latest = max(x["day"] for x in future)
             seg = min((x for x in future if x["day"] == latest), key=lambda x: x["s"])
-            n = min(seg["e"] - seg["s"], cal.total(day, j.until(day)))
+            n = min(seg["e"] - seg["s"], cal.total(day))
             cal.release(latest, seg["s"], seg["s"] + n)
             seg["s"] += n
             if seg["s"] >= seg["e"]:
                 j.slots.remove(seg)
-            j.add(day, cal.take_asap(day, n, j.until(day)), "ahead", j.main_kind)
+            j.add(day, cal.take_asap(day, n), "ahead", "target")
 
-    # 7. Blocks for the plan day, merged when the same task runs on; outlook for later days.
+    # 8. Undated tasks fill what is left of the plan day: High before Medium before Low, then list order.
+    for j in sorted([j for j in jobs if not j.dated and not j.task.repeat], key=order):
+        j.add(day, cal.take_asap(day, j.minutes), "ranked", None)
+
+    # 9. Blocks for the plan day, merged when the same task runs on; outlook for later days.
     raw = []
     for j in jobs:
         for x in j.slots:

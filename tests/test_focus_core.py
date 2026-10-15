@@ -339,7 +339,7 @@ def test_migrate_gives_deterministic_ids_and_distinct_ids_for_duplicate_names():
     assert ids[0] == uuid.uuid5(fc.NS, "task:Alpha#0").hex
     assert ids[2] == uuid.uuid5(fc.NS, "task:Alpha#1").hex
     assert d1["done"][0]["id"] == uuid.uuid5(fc.NS, "done:Gamma#2026-10-01 09:00").hex
-    assert d1["version"] == 4 and d1["folders"] == [] and d1["deleted"] == {}
+    assert d1["version"] == 5 and d1["folders"] == [] and d1["deleted"] == {}
     assert d1["planner"] == fc.DEFAULT_PLANNER and d1["planner"] is not fc.DEFAULT_PLANNER
     assert d1["order_updated_at"] == fc.EPOCH and d1["plan"]["tasks"][1]["updated_at"] == fc.EPOCH
     assert d1["plan"]["tasks"][1]["deadline"] is None and d1["plan"]["tasks"][1]["spent_s"] == 30.0
@@ -360,12 +360,12 @@ def test_migrate_v1_without_done_list():
     d["version"] = 1
     del d["done"]
     doc = fc.migrate_doc(d)
-    assert doc["version"] == 4 and doc["done"] == []
+    assert doc["version"] == 5 and doc["done"] == []
 
 
-def test_version_above_4_is_rejected():
+def test_version_above_5_is_rejected():
     d = fc.migrate_doc(_v2_doc())
-    d["version"] = 5
+    d["version"] = 6
     with pytest.raises(ValueError):
         fc.doc_to_state(d)
     with pytest.raises(ValueError):
@@ -380,7 +380,7 @@ def test_v2_file_loads_and_saves_as_v3_round_trip(tmp_path):
     assert st.timer.task_id == st.plan.tasks[2].id
     text = fc.save_state_obj(tmp_path / "out.json", st)
     doc = json.loads(text)
-    assert doc["version"] == 4
+    assert doc["version"] == 5
     assert fc.state_to_doc(fc.doc_to_state(doc)) == doc
 
 
@@ -402,7 +402,7 @@ def test_v3_round_trip_keeps_every_field(tmp_path):
     assert back.timer.task_id == t.id and back.timer.updated_at == "2026-10-12T10:00:01.000Z"
     assert back.done[0].folder == "Puzzle" and back.deleted == {"abc": "2026-10-12T09:00:00.000Z"}
     assert back.planner == fc.DEFAULT_PLANNER
-    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 4
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["version"] == 5
 
 
 def test_old_timer_dict_without_new_fields_loads():
@@ -574,7 +574,7 @@ def test_migrate_tool_writes_v3_and_never_overwrites(tmp_path):
 
 def test_load_state_raises_for_a_newer_version_instead_of_returning_an_empty_state(tmp_path):
     d = fc.migrate_doc(_v2_doc())
-    d["version"] = 5
+    d["version"] = 6
     p = tmp_path / "s.json"
     p.write_text(json.dumps(d), encoding="utf-8")
     with pytest.raises(fc.NewerVersionError):
@@ -692,3 +692,27 @@ def test_merge_states_keeps_the_shared_notes():
     shared = _notes_state()
     out = fc.merge_states(shared, fc.State(fc.Plan(), 0, fc.TimerState()))
     assert out.folder_notes == shared.folder_notes and out.progress == shared.progress
+
+
+# ---------- priority tags and the No folder filter ----------
+
+def test_priority_defaults_to_med_and_round_trips():
+    t = fc.Task("A", 5)
+    assert t.priority == "med"
+    assert fc.task_from_dict(fc.task_to_dict(fc.Task("B", 5, priority="high"))).priority == "high"
+    doc = fc.migrate_doc({"version": 4, "plan": {"tasks": [{"id": "a", "name": "A", "estimate_min": 5}]}})
+    assert doc["version"] == 5 and doc["plan"]["tasks"][0]["priority"] == "med"
+
+
+def test_by_priority_is_high_med_low_and_keeps_list_order_inside_a_tag():
+    tasks = [fc.Task("L", 5, priority="low"), fc.Task("M1", 5), fc.Task("H", 5, priority="high"),
+             fc.Task("M2", 5), fc.Task("Odd", 5, priority="??")]
+    assert [t.name for t in fc.by_priority(tasks)] == ["H", "M1", "M2", "Odd", "L"]
+    _, ranked = fc.display_sections(tasks)
+    assert [t.name for t in ranked] == ["H", "M1", "M2", "Odd", "L"]
+
+
+def test_no_folder_filter():
+    a, b = fc.Task("A", 5, folder="Home"), fc.Task("B", 5)
+    assert [t.name for t in (a, b) if fc.in_folder(t, fc.NO_FOLDER)] == ["B"]
+    assert [t.name for t in (a, b) if fc.in_folder(t, None)] == ["A", "B"]

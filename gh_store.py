@@ -11,6 +11,7 @@ What lives here:
   the result back, retrying on a conflicting write.
 - fetch_day_plan / put_day_plan: one-shot reads and writes of day-plan.json.
 - load_token / save_token / delete_token: the fine-grained GitHub token in Windows Credential Manager.
+- protect_token / unprotect_token: the copy of the token kept in local.json, encrypted for this Windows user.
 """
 from __future__ import annotations
 
@@ -425,6 +426,31 @@ def save_token(token: str) -> None:
         "Persist": win32cred.CRED_PERSIST_LOCAL_MACHINE,
     }
     win32cred.CredWrite(cred, 0)
+
+
+def protect_token(token: str) -> dict:
+    """The token as kept in local.json: {"dpapi": base64}, encrypted with Windows DPAPI so only this Windows
+    user can read it, or {"plain": token} when DPAPI cannot be used."""
+    try:
+        import win32crypt
+        blob = win32crypt.CryptProtectData(token.encode("utf-8"), "FocusTool", None, None, None, 0)
+        return {"dpapi": base64.b64encode(blob).decode("ascii")}
+    except Exception:
+        return {"plain": token}
+
+
+def unprotect_token(entry) -> Optional[str]:
+    """The token from a protect_token entry, or None when there is none or it cannot be read."""
+    if not isinstance(entry, dict):
+        return None
+    if isinstance(entry.get("plain"), str) and entry["plain"]:
+        return entry["plain"]
+    try:
+        import win32crypt
+        _, data = win32crypt.CryptUnprotectData(base64.b64decode(entry["dpapi"]), None, None, None, 0)
+        return data.decode("utf-8") or None
+    except Exception:
+        return None
 
 
 def delete_token() -> None:

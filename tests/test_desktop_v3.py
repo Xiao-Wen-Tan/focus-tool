@@ -96,17 +96,18 @@ def test_no_thought_button_and_t_key_does_nothing(make, shared):
 
 # ---------- order, ids and stamps ----------
 
-def test_new_task_goes_to_the_front_with_an_id(make, shared):
+def test_new_task_goes_to_the_end_with_an_id(make, shared):
     w = make()
     p = _with_tasks(w, fc.Task("Alpha", 10))
     p.ed_add.setText("Beta")
     p.add_task()
-    assert [t.name for t in w.plan.tasks] == ["Beta", "Alpha"]
+    assert [t.name for t in w.plan.tasks] == ["Alpha", "Beta"]
     saved = _saved(shared)
-    assert saved["version"] == 4
-    assert [t["name"] for t in saved["plan"]["tasks"]] == ["Beta", "Alpha"]
-    assert saved["plan"]["tasks"][0]["id"] == w.plan.tasks[0].id
-    assert saved["plan"]["tasks"][0]["updated_at"] != fc.EPOCH
+    assert saved["version"] == 5
+    assert [t["name"] for t in saved["plan"]["tasks"]] == ["Alpha", "Beta"]
+    assert saved["plan"]["tasks"][1]["id"] == w.plan.tasks[1].id
+    assert saved["plan"]["tasks"][1]["priority"] == "med"
+    assert saved["plan"]["tasks"][1]["updated_at"] != fc.EPOCH
     assert saved["order_updated_at"] != fc.EPOCH
 
 
@@ -157,7 +158,7 @@ def test_sort_by_date_or_in_my_order(make, clock):
     p.list.setCurrentRow(1)
     p.ed_deadline.pick(date(2026, 10, 16))
     assert w.plan.tasks[1].deadline == "2026-10-16"
-    assert _texts(p.list) == ["📅 Due Fri 10/16 · 5m · Beta", "──  no date, in your order  ──", "10m · Alpha"]
+    assert _texts(p.list) == ["📅 Due Fri 10/16 · 5m · Beta", "──  no date, by tag and your order  ──", "10m · Alpha"]
     assert p.list.dragDropMode() == ft.QAbstractItemView.NoDragDrop
     assert p.selected_task().name == "Beta"  # still open after it moved
     p.sort_combo.setCurrentIndex(p.sort_combo.findText("My order"))
@@ -342,14 +343,14 @@ def test_a_version_2_box_file_is_migrated_and_saved_as_version_3(shared, make):
         "done": []}), encoding="utf-8")
     w = make()
     saved = _saved(shared)
-    assert saved["version"] == 4
+    assert saved["version"] == 5
     assert saved["plan"]["tasks"][0]["id"] == uuid.uuid5(fc.NS, "task:Alpha#0").hex == w.plan.tasks[0].id
     assert saved["order_updated_at"] != fc.EPOCH and saved["timer"]["updated_at"] != fc.EPOCH
 
 
 def test_a_newer_version_file_is_never_overwritten(shared, make):
     shared.mkdir(parents=True)
-    text = json.dumps({"version": 5, "plan": {"tasks": []}})
+    text = json.dumps({"version": 6, "plan": {"tasks": []}})
     (shared / "state.json").write_text(text, encoding="utf-8")
     w = make()
     w.plan.tasks.append(fc.Task("Alpha", 10))
@@ -370,7 +371,7 @@ def test_enter_in_the_add_line_adds_to_the_folder_shown_and_opens_the_task(make)
     p.filter_combo.setCurrentIndex(p.filter_combo.findData("Puzzle"))
     p.ed_add.setText("Omega")
     p.ed_add.returnPressed.emit()
-    t = w.plan.tasks[0]
+    t = w.plan.tasks[-1]
     assert (t.name, t.folder, t.estimate_min) == ("Omega", "Puzzle", int(w.s["default_block_minutes"]))
     assert p.selected_task() is t and p.editor.isVisibleTo(p) and p.ed_name.text() == "Omega"
     assert p.ed_add.text() == ""
@@ -760,4 +761,54 @@ def test_by_date_lists_repeats_by_their_next_day(make, clock):
                     fc.Task("Read", 20))
     p.sort_combo.setCurrentIndex(1)
     assert _texts(p.list) == ["📅 Due Mon 10/12 · 🔁 · 5m · Walk", "📅 Due Wed 10/14 · 30m · Grant",
-                              "📅 Due Wed 10/14 · 🔁 · 30m · Gym", "──  no date, in your order  ──", "20m · Read"]
+                              "📅 Due Wed 10/14 · 🔁 · 30m · Gym", "──  no date, by tag and your order  ──", "20m · Read"]
+
+
+# ---------- priority tags and the No folder filter ----------
+
+def test_my_order_groups_high_med_low_and_shows_the_tag(make):
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10, priority="low"), fc.Task("Beta", 10), fc.Task("Gamma", 10, priority="high"),
+                    fc.Task("Delta", 10))
+    p.sort_combo.setCurrentIndex(0)
+    assert _texts(p.list) == ["High · 10m · Gamma", "10m · Beta", "10m · Delta", "Low · 10m · Alpha"]
+
+
+def test_editor_priority_buttons_set_the_tag(make, shared):
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10), fc.Task("Beta", 10))
+    p.sort_combo.setCurrentIndex(0)
+    p.list.setCurrentRow(1)
+    assert p.selected_task().name == "Beta"
+    checked = [b.text() for b in p.ed_priority.buttons() if b.isChecked()]
+    assert checked == ["Med"]
+    high = next(b for b in p.ed_priority.buttons() if b.text() == "High")
+    high.click()
+    assert w.plan.tasks[1].priority == "high"
+    assert _texts(p.list)[0] == "High · 10m · Beta"  # it moved to the top group
+    assert _saved(shared)["plan"]["tasks"][1]["priority"] == "high"
+
+
+def test_row_arrows_move_only_inside_the_tag(make):
+    w = make()
+    p = _with_tasks(w, fc.Task("Alpha", 10), fc.Task("Beta", 10, priority="high"), fc.Task("Gamma", 10))
+    p.sort_combo.setCurrentIndex(0)
+    ids = {t.name: t.id for t in w.plan.tasks}
+    p.move_task(ids["Alpha"], -1)  # Alpha is first among the Medium tasks; Beta (High) is above it
+    assert [t.name for t in w.plan.tasks] == ["Alpha", "Beta", "Gamma"]
+    p.move_task(ids["Gamma"], -1)
+    assert [t.name for t in w.plan.tasks] == ["Gamma", "Beta", "Alpha"]
+    assert _texts(p.list) == ["High · 10m · Beta", "10m · Gamma", "10m · Alpha"]
+
+
+def test_no_folder_filter_shows_tasks_without_a_folder(make):
+    w = make()
+    p = _with_tasks(w, *_folder_tasks())
+    p.filter_combo.setCurrentIndex(p.filter_combo.findData(fc.NO_FOLDER))
+    assert p.filter_combo.currentText() == "No folder"
+    assert _texts(p.list) == ["10m · Delta"]
+    assert not p.notes_box.isVisibleTo(p)  # no folder, so no folder notes
+    p.ed_add.setText("Omega")
+    p.ed_add.returnPressed.emit()
+    assert w.plan.tasks[-1].folder is None
+    assert _texts(p.list) == ["10m · Delta", f"{w.s['default_block_minutes']}m · Omega"]

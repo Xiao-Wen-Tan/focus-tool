@@ -213,7 +213,8 @@ def make_sync_engine(cfg: dict) -> gh_store.SyncEngine:
 
 
 def load_token() -> str | None:
-    """The saved GitHub token, or None (also when the Credential Manager cannot be used)."""
+    """The GitHub token saved in the Windows Credential Manager, or None (also when it cannot be used).
+    FocusWidget.saved_token also looks at the copy in local.json."""
     try:
         return gh_store.load_token() or None
     except Exception:
@@ -784,7 +785,8 @@ class GitHubDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
         hint = QLabel("Your list is kept in a private GitHub repository that the phone also reads. The token "
-                      "is saved in the Windows Credential Manager, never in a file.")
+                      "is saved in the Windows Credential Manager and, encrypted for your Windows account, in "
+                      "this computer's settings file (local.json).")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -793,7 +795,7 @@ class GitHubDialog(QDialog):
         self.branch = QLineEdit(cfg.get("branch", "") or "main")
         self.token = QLineEdit()
         self.token.setEchoMode(QLineEdit.Password)
-        self.token.setPlaceholderText("Saved. Leave empty to keep it." if load_token()
+        self.token.setPlaceholderText("Saved. Leave empty to keep it." if widget.saved_token()
                                       else "Fine-grained token with Contents read and write")
         for label, edit in (("Owner", self.owner), ("Repository", self.repo), ("Branch", self.branch),
                             ("Token", self.token)):
@@ -830,7 +832,7 @@ class GitHubDialog(QDialog):
                 "branch": self.branch.text().strip() or "main"}
 
     def test(self):
-        cfg, token = self._config(), self.token.text().strip() or load_token()
+        cfg, token = self._config(), self.token.text().strip() or self.w.saved_token()
         if not (cfg["owner"] and cfg["repo"] and token):
             self.result.setText("Fill in the owner, the repository and a token first.")
             return
@@ -851,16 +853,15 @@ class GitHubDialog(QDialog):
 
     def save(self) -> bool:
         cfg, typed = self._config(), self.token.text().strip()
-        token = typed or load_token()
+        token = typed or self.w.saved_token()
         if not (cfg["owner"] and cfg["repo"] and token):
             self.result.setText("Fill in the owner, the repository and a token first.")
             return False
         if typed:
             try:
                 gh_store.save_token(typed)
-            except Exception as ex:
-                self.result.setText(f"Could not save the token ({_short(ex)}).")
-                return False
+            except Exception:
+                pass  # some computers do not keep it there; the copy in local.json (connect_github) still does
         self.w.connect_github(cfg, token)
         self.accept()
         return True
@@ -877,6 +878,10 @@ _KEEP = object()  # passed to TaskPanel.refresh to keep the current selection
 EDITOR_ROW = "\x00editor"    # item data of the list row that holds the open task's editor
 DIVIDER_ROW = "\x00divider"  # item data of the line between dated and other tasks (By date)
 SORT_CHOICES = ("My order", "By date")
+PRIORITY_CHOICES = (("low", "Low"), ("med", "Med"), ("high", "High"))  # the editor's tag buttons, left to right
+PRIORITY_TAG = {"high": "High", "med": "Med", "low": "Low"}  # the tag at the start of a High or Low row
+TIME_TIP = ("The time it starts, for a meeting or event, such as 2pm or 14:00. The day plan books it at this "
+            "time. Leave it empty if it only has a date.")
 
 
 class DateButton(QPushButton):
@@ -1131,14 +1136,15 @@ class TaskPanel(QWidget):
         show = QHBoxLayout()
         show.addWidget(QLabel("Show"))
         self.filter_combo = QComboBox()
-        self.filter_combo.setToolTip("Show one folder and its subfolders, or all tasks")
+        self.filter_combo.setToolTip("Show one folder and its subfolders, the tasks without a folder, or all tasks")
         self.filter_combo.currentIndexChanged.connect(self._filter_changed)
         show.addWidget(self.filter_combo, 1)
         show.addWidget(QLabel("Sort"))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(list(SORT_CHOICES))
-        self.sort_combo.setToolTip("My order: the order you set by dragging. "
-                                   "By date: dated tasks first, earliest first, then the rest in your order.")
+        self.sort_combo.setToolTip("My order: High, then Med, then Low; inside each tag, the order you set by "
+                                   "dragging. By date: dated tasks first, earliest first, then the rest by tag and "
+                                   "your order.")
         self.sort_combo.setCurrentIndex(1 if widget.ui.get("panel_sort") == "date" else 0)
         self.sort_combo.currentIndexChanged.connect(self._sort_changed)
         show.addWidget(self.sort_combo)
@@ -1257,6 +1263,20 @@ class TaskPanel(QWidget):
         self.ed_time = TimePicker()
         self.ed_time.changed.connect(self._apply_editor)
         tc.addWidget(self.ed_time)
+        prow = QHBoxLayout()
+        prow.addWidget(self._row_label("Priority"))
+        self.ed_priority = QButtonGroup(self)
+        self.ed_priority.setExclusive(True)
+        for value, label in PRIORITY_CHOICES:
+            b = QPushButton(label)  # a pill that turns green when chosen
+            b.setObjectName("pill")
+            b.setCheckable(True)
+            b.setProperty("priority", value)
+            self.ed_priority.addButton(b)
+            prow.addWidget(b)
+        self.ed_priority.buttonToggled.connect(lambda _b, on: on and self._apply_editor())
+        prow.addStretch()
+        tc.addLayout(prow)
         self.ed_details = QPlainTextEdit()
         self.ed_details.setPlaceholderText("Details (optional): the first step, a link, what done looks like")
         self.ed_details.setFixedHeight(max(DETAILS_MIN_H, int(self.w.ui.get("details_h", DETAILS_DEFAULT_H))))
@@ -1269,8 +1289,7 @@ class TaskPanel(QWidget):
         self.ed_deadline_time = QLineEdit()
         self.ed_deadline_time.setPlaceholderText("time (optional)")
         self.ed_deadline_time.setFixedWidth(120)
-        self.ed_deadline_time.setToolTip("The time of day the deadline falls at, such as 5pm or 17:00. "
-                                         "Leave it empty for the end of the day.")
+        self.ed_deadline_time.setToolTip(TIME_TIP)
         self.ed_deadline_time.editingFinished.connect(self._deadline_time_done)
         self.ed_deadline = self._date_row(tc, "Deadline", "A hard date the task must be done by", mark,
                                           extra=self.ed_deadline_time)
@@ -1468,20 +1487,27 @@ class TaskPanel(QWidget):
             text = f"{due_text(t)} · {text}"
         if show_folder and t.folder:
             text += f"   📁 {t.folder}"
-        return text
+        tag = PRIORITY_TAG.get(t.priority)
+        return f"{tag} · {text}" if t.priority in ("high", "low") else text  # Medium, the default, has no tag
 
     def filter_path(self) -> str | None:
-        """The folder the list is filtered to, or None for all tasks."""
+        """The folder the list is filtered to, fc.NO_FOLDER for the tasks without a folder, or None for all tasks."""
         return self.filter_combo.currentData() or None
+
+    def filter_folder(self) -> str | None:
+        """The one folder the list is filtered to, or None (all tasks, or the tasks without a folder)."""
+        path = self.filter_path()
+        return None if path == fc.NO_FOLDER else path
 
     def by_date(self) -> bool:
         return self.sort_combo.currentIndex() == 1
 
     def _shown_tasks(self) -> list:
-        """The tasks in the list, in its order, with DIVIDER_ROW between dated and other tasks (By date)."""
+        """The tasks in the list, in its order, with DIVIDER_ROW between dated and other tasks (By date).
+        My order: High, then Medium, then Low, your order inside each tag."""
         path = self.filter_path()
         if not self.by_date():
-            return [t for t in self.w.plan.tasks if fc.in_folder(t, path)]
+            return fc.by_priority(t for t in self.w.plan.tasks if fc.in_folder(t, path))
         dated, ranked = (([t for t in part if fc.in_folder(t, path)])
                          for part in fc.display_sections(self.w.plan.tasks, self.w.today()))
         return dated + ([DIVIDER_ROW] if dated and ranked else []) + ranked
@@ -1524,7 +1550,7 @@ class TaskPanel(QWidget):
         self.list.clear()
         for t in self._shown_tasks():
             if t is DIVIDER_ROW:
-                item = QListWidgetItem("──  no date, in your order  ──")
+                item = QListWidgetItem("──  no date, by tag and your order  ──")
                 item.setData(Qt.UserRole, DIVIDER_ROW)
                 item.setFlags(Qt.NoItemFlags)
                 item.setTextAlignment(Qt.AlignCenter)
@@ -1585,9 +1611,9 @@ class TaskPanel(QWidget):
         self._notes_label()
 
     def _show_notes(self):
-        """Show the notes of the folder the list is filtered to; hide the box for All tasks. Text being typed
-        is kept when a sync refreshes the window."""
-        path = self.filter_path()
+        """Show the notes of the folder the list is filtered to; hide the box for All tasks and No folder. Text
+        being typed is kept when a sync refreshes the window."""
+        path = self.filter_folder()
         self.notes_box.setVisible(path is not None)
         if path is None:
             self._notes_path = None
@@ -1816,6 +1842,7 @@ class TaskPanel(QWidget):
         self.bulk_folder.addItem("Move to folder...", None)
         self.bulk_folder.addItem("No folder", "")
         self.filter_combo.addItem("All tasks", "")
+        self.filter_combo.addItem("No folder", fc.NO_FOLDER)
         self.ed_folder.clear()
         self.ed_folder.addItem("No folder", "")
         for p, depth in tree:
@@ -1952,8 +1979,7 @@ class TaskPanel(QWidget):
             self._time_error(True)
             return
         self._time_error(False)
-        self.ed_deadline_time.setToolTip("The time of day the deadline falls at, such as 5pm or 17:00. "
-                                         "Leave it empty for the end of the day.")
+        self.ed_deadline_time.setToolTip(TIME_TIP)
         self._updating = True
         self.ed_deadline_time.setText(fc.fmt_hm(hm))
         self._updating = False
@@ -2009,7 +2035,16 @@ class TaskPanel(QWidget):
             self.ed_details.setPlainText(t.details)
         self._shown_time = t.deadline_time
         self._show_fields(t.deadline, t.target, t.folder, t.repeat, t.deadline_time)
+        self._set_priority(t.priority)
         self._updating = False
+
+    def _set_priority(self, value: str | None):
+        for b in self.ed_priority.buttons():
+            b.setChecked(b.property("priority") == (value if value in PRIORITY_TAG else "med"))
+
+    def _priority_choice(self) -> str:
+        b = self.ed_priority.checkedButton()
+        return b.property("priority") if b is not None else "med"
 
     def _apply_editor(self, *_):
         if self._updating:
@@ -2018,16 +2053,17 @@ class TaskPanel(QWidget):
         if t is None:
             return
         v = self._editor_values()
-        before = (t.deadline, t.target, t.folder, t.repeat, t.deadline_time)
+        before = (t.deadline, t.target, t.folder, t.repeat, t.deadline_time, t.priority)
         t.name = self.ed_name.text().strip() or t.name
         t.estimate_min = self.ed_time.value()
         t.details = self.ed_details.toPlainText()
         t.deadline, t.target, t.folder, t.repeat = v["deadline"], v["target"], v["folder"], v["repeat"]
         t.deadline_time = self._shown_time = v["deadline_time"]
+        t.priority = self._priority_choice()
         if t is self.w.active and self.w.timer.running:
             self.w.timer.task = t.name
             self.w.timer.estimate_min = t.estimate_min
-        if (t.deadline, t.target, t.folder, t.repeat, t.deadline_time) != before:
+        if (t.deadline, t.target, t.folder, t.repeat, t.deadline_time, t.priority) != before:
             self.refresh()  # the task may move, or leave the folder shown
         else:
             row = self._row_of(t.id)
@@ -2041,13 +2077,14 @@ class TaskPanel(QWidget):
 
     # -- add / reorder / remove
     def add_task(self):
-        """Add the task typed in the top box to the front of the list, in the folder shown, and open it."""
+        """Add the task typed in the top box to the end of the list (so it is last in its tag, below the tasks
+        entered earlier), in the folder shown, and open it."""
         name = self.ed_add.text().strip()
         if not name:
             self.ed_add.setFocus()
             return
-        t = fc.Task(name, int(self.w.s["default_block_minutes"]), folder=self.filter_path())
-        self.w.plan.tasks.insert(0, t)
+        t = fc.Task(name, int(self.w.s["default_block_minutes"]), folder=self.filter_folder())
+        self.w.plan.tasks.append(t)
         self.ed_add.clear()
         self.refresh(t.id)
         QTimer.singleShot(0, self._show_editor_row)
@@ -2083,8 +2120,12 @@ class TaskPanel(QWidget):
             self.move_task(t.id, delta)
 
     def move_task(self, task_id, delta: int):
-        """Move a task one place up (-1) or down (+1) among the tasks shown. My order only."""
-        ids = self._shown_ids()
+        """Move a task one place up (-1) or down (+1) among the tasks shown with the same tag. My order only."""
+        t = self._task_by_id(task_id)
+        if t is None:
+            return
+        ids = [i for i in self._shown_ids()
+               if fc.priority_rank(self._task_by_id(i) or t) == fc.priority_rank(t)]
         if self.by_date() or task_id not in ids:
             return
         row = ids.index(task_id)
@@ -2268,6 +2309,7 @@ class FocusWidget(QWidget):
         self._gh_cfg: dict | None = ({k: str(gh.get(k) or "") for k in ("owner", "repo", "branch")}
                                     if isinstance(gh, dict) and gh.get("owner") and gh.get("repo") else None)
         self._gh_imported = bool(local.get("github_imported"))  # the Box list was merged into GitHub once
+        self._token_entry = local.get("github_token") if self._gh_cfg is not None else None  # see saved_token
         if not self._merged:
             try:
                 old_geometry = merge_old_local_data(local_dir(), shared)
@@ -2337,9 +2379,13 @@ class FocusWidget(QWidget):
         self.panel = TaskPanel(self)
         self.plan_window = DayPlanWindow(self)
         if self._gh_cfg is not None:
-            token = load_token()
+            token = self.saved_token()
             if token:
+                if gh_store.unprotect_token(self._token_entry) != token:
+                    self._token_entry = gh_store.protect_token(token)  # keep a copy in local.json from now on
                 self._start_github(token)
+            else:
+                self._set_sync_status("GitHub key missing. Open GitHub sync and enter the token again.", alert=True)
 
         self.tick_timer = QTimer(self)
         self.tick_timer.timeout.connect(self.on_tick)
@@ -2677,10 +2723,17 @@ class FocusWidget(QWidget):
         if self._shared_dirty:
             self._save_shared()
 
+    def saved_token(self) -> str | None:
+        """The GitHub token: from the Windows Credential Manager, or else from the copy in local.json (some
+        computers do not keep it in the Credential Manager after a restart)."""
+        return load_token() or gh_store.unprotect_token(self._token_entry)
+
     def _save_local(self):
         d = {"geometry": self.geometry_dict(), "merged_into_shared": self._merged}
         if self._gh_cfg is not None:
-            d["github"] = self._gh_cfg  # owner, repo, branch; the token is in the Windows Credential Manager
+            d["github"] = self._gh_cfg  # owner, repo, branch
+            if self._token_entry:
+                d["github_token"] = self._token_entry  # encrypted for this Windows user when possible
         if self._gh_imported:
             d["github_imported"] = True
         try:
@@ -2869,6 +2922,7 @@ class FocusWidget(QWidget):
         if self.mode == "github" and cfg != self._gh_cfg:
             self._end_session(delete_files=True)  # the saved copies of another repo do not apply
         self._gh_cfg = cfg
+        self._token_entry = gh_store.protect_token(token)
         self._save_local()
         self._start_github(token, running=True)
 
@@ -2882,6 +2936,7 @@ class FocusWidget(QWidget):
             pass
         self._end_session(delete_files=True)
         self._engine, self.mode, self._gh_cfg, self._gh_imported = None, "box", None, False
+        self._token_entry = None
         self._auth_blocked = False
         self._save_local()
         self._set_sync_status("")

@@ -5,11 +5,13 @@
 // Dates are plain "YYYY-MM-DD" strings. "Naive" times are local wall-clock times in the
 // planner's time zone written without a zone, like Python's datetime.isoformat().
 
-export const STATE_VERSION = 4; // 4 adds deadline times and folder notes; 3 still loads
+export const STATE_VERSION = 5; // 4 adds deadline times and folder notes, 5 the priority tag; 3 and 4 still load
 export const EPOCH = "1970-01-01T00:00:00.000Z";
 export const NS = "212d6585-c191-5e24-9304-4a619852c6c3"; // same fixed namespace as focus_core.NS
 export const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 export const TOMBSTONE_DAYS = 60;
+export const PRIORITIES = ["high", "med", "low"]; // the priority tag, most important first; "med" is the default
+export const NO_FOLDER = "\u0000none"; // a folder filter that shows only the tasks without a folder
 export const DEFAULT_CHECKPOINTS = [0.5, 0.9, 1.0];
 const WORKDAY = ["09:00-12:00", "13:30-18:00"];
 const WEEKEND = ["10:00-12:30"];
@@ -21,9 +23,9 @@ export const DEFAULT_PLANNER = Object.freeze({
 });
 
 const TASK_FIELDS = ["name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done",
-  "deadline_time"];
+  "deadline_time", "priority"];
 const TASK_DEFAULTS = { details: "", spent_s: 0, deadline: null, target: null, folder: null, repeat: null, last_done: null,
-  deadline_time: null };
+  deadline_time: null, priority: "med" };
 const DONE_FIELDS = ["name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder",
   "deadline_time"];
 
@@ -275,12 +277,12 @@ function fillProgress(x) {
   return { id: x.id || uuid5Hex(NS, `note:${folder ?? ""}#${at}#${text}`), folder, at, text, updated_at: x.updated_at || EPOCH };
 }
 
-/** An empty version 4 document. */
+/** An empty version 5 document. */
 export function emptyDoc() {
   return normalizeDoc({ version: STATE_VERSION });
 }
 
-/** A complete version 4 document with every missing field filled in (a new copy). Version 3 also loads.
+/** A complete version 5 document with every missing field filled in (a new copy). Versions 3 and 4 also load.
  * Unlike Python's migrate_doc, older versions are refused: the desktop updates them. */
 export function normalizeDoc(d) {
   if (!d || typeof d !== "object") throw new Error("The list file is not a JSON object.");
@@ -288,7 +290,8 @@ export function normalizeDoc(d) {
   if (d.version === null || typeof d.version === "boolean" || !Number.isFinite(version)) {
     throw new Error(`The list file has an unreadable version (${d.version}).`);
   }
-  if (Math.trunc(version) !== STATE_VERSION && Math.trunc(version) !== 3) throw new VersionError(Math.trunc(version));
+  const v = Math.trunc(version);
+  if (v !== STATE_VERSION && v !== 4 && v !== 3) throw new VersionError(v);
   const timer = Object.assign(defaultTimer(), clone(d.timer || {}));
   timer.updated_at = timer.updated_at || EPOCH;
   const planner = d.planner ? clone(d.planner) : clone(DEFAULT_PLANNER);
@@ -463,6 +466,17 @@ export function parseHm(s) {
   return hh < 24 && mm < 60 ? hh * 60 + mm : null;
 }
 
+/** 0 for High, 1 for Medium, 2 for Low. A value this app does not know counts as Medium. */
+export function priorityRank(t) {
+  const k = PRIORITIES.indexOf(t.priority);
+  return k < 0 ? 1 : k;
+}
+
+/** High tasks first, then Medium, then Low; list order inside each tag (a stable sort). */
+export function byPriority(tasks) {
+  return [...tasks].sort((a, b) => priorityRank(a) - priorityRank(b));
+}
+
 export function isDated(t) {
   return Boolean(t.deadline || t.target);
 }
@@ -477,7 +491,8 @@ export function taskDate(t) {
  * date, an earlier deadline time first (no time counts as day end), then list order. Without `today`, a
  * repeating task with a deadline is dated by it and one without is ranked. With `today` ("YYYY-MM-DD"), every
  * repeating task is dated by the next day it comes up (nextDueDay), counted as a deadline at the end of that
- * day. Ranked: every other task in list order. Like display_sections in focus_core.py. */
+ * day. Ranked: every other task, High then Medium then Low, list order inside each tag. Like display_sections in
+ * focus_core.py. */
 export function displaySections(tasks, today = null) {
   const dated = [], ranked = [];
   tasks.forEach((t, i) => {
@@ -489,7 +504,7 @@ export function displaySections(tasks, today = null) {
       dated.push([[first, t.deadline ? 0 : 1, hm == null ? 1440 : hm, i], t]);
     } else ranked.push(t);
   });
-  return [dated.sort((x, y) => cmpTuple(x[0], y[0])).map((x) => x[1]), ranked];
+  return [dated.sort((x, y) => cmpTuple(x[0], y[0])).map((x) => x[1]), byPriority(ranked)];
 }
 
 /** The next day a repeating task comes up ("YYYY-MM-DD"): today when it is due today, else its next day.
@@ -623,8 +638,10 @@ function under(folder, path) {
   return folder != null && (folder === path || folder.startsWith(path + "/"));
 }
 
-/** True if `task` is in folder `path` or one of its subfolders. path null means all tasks. */
+/** True if `task` is in folder `path` or one of its subfolders. path null means all tasks, NO_FOLDER the tasks
+ * without a folder. */
 export function inFolder(task, path) {
+  if (path === NO_FOLDER) return !task.folder;
   return path == null || under(task.folder, path);
 }
 

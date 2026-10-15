@@ -375,7 +375,7 @@ def test_box_write_merges_a_change_saved_meanwhile(env):
 def test_box_write_never_replaces_a_newer_file_saved_meanwhile(env):
     here = env.computer("a", github=False)
     add(here, "Alpha")
-    text = json.dumps({"version": 5, "plan": {"tasks": []}})
+    text = json.dumps({"version": 6, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     add(here, "Beta")
     assert (env.box / "state.json").read_text(encoding="utf-8") == text
@@ -517,7 +517,7 @@ def test_disconnect_cancels_queued_and_running_jobs(env):
 
 def test_a_newer_box_file_does_not_block_github_mode(env):
     env.box.mkdir(parents=True)
-    text = json.dumps({"version": 5, "plan": {"tasks": []}})
+    text = json.dumps({"version": 6, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     a = env.computer("a")
     add(a, "Alpha")
@@ -614,7 +614,7 @@ def test_a_newer_box_file_saved_during_github_mode_is_not_overwritten(env):
     a = env.computer("a")
     add(a, "Alpha")
     a.sync_now()
-    text = json.dumps({"version": 5, "plan": {"tasks": []}})
+    text = json.dumps({"version": 6, "plan": {"tasks": []}})
     (env.box / "state.json").write_text(text, encoding="utf-8")
     add(a, "Beta")
     assert a.sync_now().status == "ok"
@@ -648,3 +648,54 @@ def test_a_locked_log_does_not_stop_done(env, clock, tmp_path):
     a.done(t)
     assert "Alpha" not in names(a)
     assert [d.name for d in a.completed] == ["Alpha"]
+
+
+# ---------- the token's copy in local.json ----------
+
+def _local(env, name):
+    return json.loads((env.tmp / name / "FocusTool" / "local.json").read_text(encoding="utf-8"))
+
+
+def test_token_in_local_json_survives_a_restart_when_the_credential_manager_does_not_keep_it(env, monkeypatch):
+    env.tokens["t"] = None
+
+    def refuse(_token):
+        raise OSError("A specified logon session does not exist.")
+
+    monkeypatch.setattr(gh_store, "save_token", refuse)
+    a = env.computer("a", github=False)
+    dlg = env.ft.GitHubDialog(a)
+    dlg.owner.setText("me")
+    dlg.repo.setText("focus-data")
+    dlg.token.setText("test-token")
+    assert dlg.save() and a.mode == "github"
+    entry = _local(env, "a")["github_token"]
+    assert "test-token" not in json.dumps(entry)  # encrypted, not in plain text
+    assert gh_store.unprotect_token(entry) == "test-token"
+    a.stop_sync()
+    a.close()
+    again = env.computer("a")  # the exe restarted; the Credential Manager still has nothing
+    assert again.mode == "github" and again.saved_token() == "test-token"
+    add(again, "Alpha")
+    again.sync_now()
+    assert remote_names(env.fake) == ["Alpha"]
+
+
+def test_a_token_in_the_credential_manager_is_copied_into_local_json(env):
+    b = env.computer("b")
+    assert b.mode == "github"
+    assert gh_store.unprotect_token(_local(env, "b")["github_token"]) == "test-token"
+
+
+def test_a_missing_token_says_so_instead_of_quietly_using_box(env):
+    env.tokens["t"] = None
+    c = env.computer("c")
+    assert c.mode == "box"
+    assert "GitHub key missing" in c.sync_status
+
+
+def test_disconnect_removes_the_token_copy_from_local_json(env):
+    d = env.computer("d")
+    assert "github_token" in _local(env, "d")
+    d.disconnect_github()
+    assert "github_token" not in _local(env, "d") and "github" not in _local(env, "d")

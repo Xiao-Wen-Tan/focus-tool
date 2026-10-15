@@ -46,68 +46,97 @@ def utc(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
 
 
-# ---------- the worked example from the contract
+# ---------- the worked example
 
 def test_worked_example_exact():
-    st = state_of(T("D", 600, deadline="2026-10-16"), T("R1", 5), T("R2", 45))
+    # A meeting at 14:00, a form due today, a report to aim for by Friday (Low), and two undated tasks.
+    st = state_of(T("Meeting", 60, deadline="2026-10-13", deadline_time="14:00"),
+                  T("Form", 30, deadline="2026-10-13"),
+                  T("Report", 120, target="2026-10-16", priority="low"),
+                  T("Read", 60),
+                  T("Email", 60, priority="high"))
     p = planner.plan_day(st, TUE, None, CFG)
     assert p["date"] == "2026-10-13"
     assert p["start"] == "09:00"
-    assert p["capacity_min"] == 450 and p["free_min"] == 0
-    assert rows(p) == [("09:00", "09:05", "R1", "ranked"), ("09:05", "09:50", "R2", "ranked"),
-                       ("09:50", "12:00", "D", "ahead"), ("13:30", "18:00", "D", "dated")]
-    assert [b["minutes"] for b in p["blocks"]] == [5, 45, 130, 270]
-    assert sum(b["minutes"] for b in p["blocks"]) == 450
-    assert [b["left_after_min"] for b in p["blocks"]] == [0, 0, 470, 200]
-    d_block = p["blocks"][3]
-    assert d_block["date"] == "2026-10-16" and d_block["date_kind"] == "deadline" and d_block["repeat"] is False
-    assert p["blocks"][0]["date"] is None and p["blocks"][0]["date_kind"] is None
-    assert outlook(p) == [("d", "2026-10-14", 200)]
-    assert p["warnings"] == []
+    assert p["capacity_min"] == 450 and p["free_min"] == 120
+    assert rows(p) == [("09:00", "09:30", "Form", "dated"), ("09:30", "11:30", "Report", "ahead"),
+                       ("11:30", "12:00", "Email", "ranked"), ("13:30", "14:00", "Email", "ranked"),
+                       ("14:00", "15:00", "Meeting", "fixed"), ("15:00", "16:00", "Read", "ranked")]
+    meeting = p["blocks"][4]
+    assert meeting["date"] == "2026-10-13" and meeting["date_kind"] == "deadline" and meeting["time"] == "14:00"
+    assert p["blocks"][1]["date_kind"] == "target" and p["blocks"][1]["date"] == "2026-10-16"
+    assert p["blocks"][2]["date"] is None and p["blocks"][2]["date_kind"] is None
+    assert [b["left_after_min"] for b in p["blocks"]] == [0, 0, 30, 0, 0, 0]
+    assert p["outlook"] == [] and p["warnings"] == []
     assert p["version"] == 1 and p["tz"] == "America/Chicago"
 
 
 # ---------- urgent and overdue
 
-def test_urgent_and_overdue_tasks_come_first_with_warnings():
+def test_overdue_and_urgent_tasks_come_first_with_warnings():
     st = state_of(T("Rank", 60),
                   T("Late target", 60, target="2026-10-09"),
                   T("Soon", 60, deadline="2026-10-14"),
                   T("Past", 60, deadline="2026-10-12"))
     p = planner.plan_day(st, TUE, None, CFG)
-    assert rows(p)[:4] == [("09:00", "10:00", "Past", "urgent"), ("10:00", "11:00", "Soon", "urgent"),
-                           ("11:00", "12:00", "Late target", "urgent"), ("13:30", "14:30", "Rank", "ranked")]
-    assert kinds(p) == [("Late target", "overdue"), ("Past", "overdue"), ("Soon", "in_buffer")]
-    assert p["blocks"][2]["date_kind"] == "target"
+    assert rows(p) == [("09:00", "10:00", "Past", "urgent"), ("10:00", "11:00", "Late target", "urgent"),
+                       ("11:00", "12:00", "Rank", "ranked")]
+    assert kinds(p) == [("Late target", "overdue"), ("Past", "overdue")]
+    assert p["warnings"][0]["message"] == "its date Mon 10/12 has passed"
+    assert p["blocks"][1]["date_kind"] == "target"
+    assert outlook(p) == [("soon", "2026-10-14", 60)]  # a hard date tomorrow waits for tomorrow
+
+
+def test_aim_date_inside_the_buffer_is_urgent():
+    st = state_of(T("Rank", 60, priority="high"), T("Soon", 60, target="2026-10-14"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "10:00", "Soon", "urgent"), ("10:00", "11:00", "Rank", "ranked")]
+    assert kinds(p) == [("Soon", "in_buffer")]
+    assert p["warnings"][0]["message"] == "inside the 2 working days before its aim date Wed 10/14"
 
 
 def test_urgent_work_overflows_into_later_days():
-    st = state_of(T("Big", 600, deadline="2026-10-14"))
+    st = state_of(T("Big", 600, target="2026-10-14"))
     p = planner.plan_day(st, TUE, None, CFG)
     assert rows(p) == [("09:00", "12:00", "Big", "urgent"), ("13:30", "18:00", "Big", "urgent")]
     assert outlook(p) == [("big", "2026-10-14", 150)]
 
 
-# ---------- dated work
+# ---------- hard dates
 
-def test_deadline_beats_target():
-    # Both finish-by dates are Wed 10/14. The deadline task gets Wednesday, the target task Tuesday.
+def test_hard_date_is_booked_on_its_day_not_before():
     st = state_of(T("Aim", 450, target="2026-10-16"), T("Hard", 450, deadline="2026-10-16"))
     p = planner.plan_day(st, TUE, None, CFG)
     assert {b["name"] for b in p["blocks"]} == {"Aim"}
-    assert outlook(p) == [("hard", "2026-10-14", 450)]
+    assert outlook(p) == [("hard", "2026-10-16", 450)]
     assert p["warnings"] == []
 
 
-def test_task_with_both_dates_keeps_its_deadline_slots():
-    # Task Both has deadline Mon 10/19 (finish by Thu 10/15) and target Thu 10/15 (finish by Tue 10/13).
-    # Task Other has only a target (finish by Thu 10/15). It may not take the slots Both needs.
+def test_hard_date_task_too_big_for_its_day_warns():
+    st = state_of(T("Huge", 600, deadline="2026-10-14"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert p["blocks"] == []
+    assert outlook(p) == [("huge", "2026-10-14", 450)]
+    assert kinds(p) == [("Huge", "deadline_missed")]
+    assert p["warnings"][0]["message"] == "needs 150 min more than fits on its date Wed 10/14"
+    assert p["warnings"][0]["minutes"] == 150
+
+
+def test_hard_dates_on_the_same_day_go_by_priority_then_list_order():
+    st = state_of(T("A", 30, deadline="2026-10-13"), T("B", 30, deadline="2026-10-13", priority="high"),
+                  T("C", 30, deadline="2026-10-13"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert [r[2] for r in rows(p)] == ["B", "A", "C"]
+
+
+def test_hard_date_wins_over_an_aim_date():
+    # Both has a hard date Mon 10/19 and an aim date Thu 10/15: it is booked on Monday only.
     st = state_of(T("Both", 900, deadline="2026-10-19", target="2026-10-15"),
                   T("Other", 450, target="2026-10-19"))
     p = planner.plan_day(st, TUE, None, CFG)
-    assert rows(p) == [("09:00", "12:00", "Other", "dated"), ("13:30", "18:00", "Other", "dated")]
-    assert outlook(p) == [("both", "2026-10-14", 450), ("both", "2026-10-15", 450)]
-    assert kinds(p) == [("Both", "target_missed")]
+    assert rows(p) == [("09:00", "12:00", "Other", "ahead"), ("13:30", "18:00", "Other", "ahead")]
+    assert outlook(p) == [("both", "2026-10-19", 450)]
+    assert kinds(p) == [("Both", "deadline_missed")]
 
 
 def test_target_later_than_deadline_is_ignored():
@@ -127,21 +156,10 @@ def test_weekend_capacity_is_150_minutes():
 def test_task_longer_than_a_day_splits_across_days():
     # 1000 min with finish by Thu 10/15. Thu 450 and Wed 450 are reserved backwards and 100 on Tue,
     # then the rest of Tuesday pulls 350 minutes forward from Thursday.
-    st = state_of(T("Long", 1000, deadline="2026-10-19"))
+    st = state_of(T("Long", 1000, target="2026-10-19"))
     p = planner.plan_day(st, TUE, None, CFG)
     assert sum(b["minutes"] for b in p["blocks"]) == 450
     assert outlook(p) == [("long", "2026-10-14", 450), ("long", "2026-10-15", 100)]
-
-
-def test_deadline_missed_and_buffer_warnings():
-    # Deadline Thu 10/15, finish by Tue 10/13. 1500 min but only 1350 fit by Thursday.
-    st = state_of(T("Huge", 1500, deadline="2026-10-15"))
-    p = planner.plan_day(st, TUE, None, CFG)
-    assert kinds(p) == [("Huge", "deadline_missed"), ("Huge", "uses_buffer")]
-    miss = [w for w in p["warnings"] if w["kind"] == "deadline_missed"][0]
-    assert miss["message"] == "needs 150 min more than fits before Thu 10/15"
-    assert miss["task_id"] == "huge"
-    assert outlook(p) == [("huge", "2026-10-14", 450), ("huge", "2026-10-15", 450)]
 
 
 def test_target_missed_puts_the_rest_after_the_finish_by_day():
@@ -176,20 +194,20 @@ def test_finished_tasks_are_skipped():
 
 # ---------- repeating tasks
 
-def test_repeats_planned_in_rank_order_only_when_active():
+def test_repeats_planned_before_undated_tasks_only_when_active():
     st = state_of(T("Walk", 20, repeat={"kind": "daily"}),
                   T("Mondays", 30, repeat={"kind": "days", "days": ["mon"]}),
-                  T("Plain", 10),
+                  T("Plain", 10, priority="high"),
                   T("Done today", 15, repeat={"kind": "weekdays"}, last_done="2026-10-13"),
                   T("Odd days", 25, repeat={"kind": "every", "every": 2, "anchor": "2026-10-11"}))
     p = planner.plan_day(st, TUE, None, CFG)
-    assert rows(p) == [("09:00", "09:20", "Walk", "ranked"), ("09:20", "09:30", "Plain", "ranked"),
-                       ("09:30", "09:55", "Odd days", "ranked")]
-    assert [b["repeat"] for b in p["blocks"]] == [True, False, True]
+    assert rows(p) == [("09:00", "09:20", "Walk", "ranked"), ("09:20", "09:45", "Odd days", "ranked"),
+                       ("09:45", "09:55", "Plain", "ranked")]
+    assert [b["repeat"] for b in p["blocks"]] == [True, True, False]
 
 
 def test_repeats_on_later_days_reduce_capacity_for_dated_work():
-    st = state_of(T("Walk", 30, repeat={"kind": "daily"}), T("D", 450, deadline="2026-10-16"))
+    st = state_of(T("Walk", 30, repeat={"kind": "daily"}), T("D", 450, target="2026-10-16"))
     p = planner.plan_day(st, TUE, None, CFG)
     assert rows(p) == [("09:00", "09:30", "Walk", "ranked"), ("09:30", "12:00", "D", "ahead"),
                        ("13:30", "18:00", "D", "dated")]
@@ -308,41 +326,60 @@ def test_cli_skip_leaves_the_file_untouched(tmp_path):
     assert rc == 0 and out.read_text(encoding="utf-8") == text
 
 
-# ---------- deadline time of day
+# ---------- fixed time (a hard date with a time of day)
 
-def test_deadline_time_today_gets_work_only_before_it():
-    st = state_of(T("Form", 120, deadline="2026-10-13", deadline_time="10:00"))
+def test_fixed_time_is_booked_at_exactly_its_time():
+    st = state_of(T("Plain", 600), T("Meeting", 60, deadline="2026-10-13", deadline_time="14:00"))
     p = planner.plan_day(st, TUE, None, CFG)
-    assert rows(p) == [("09:00", "10:00", "Form", "urgent")]
-    assert p["blocks"][0]["time"] == "10:00" and p["blocks"][0]["date_kind"] == "deadline"
-    assert outlook(p) == [("form", "2026-10-14", 60)]  # what did not fit before 10:00 goes after it
-    assert kinds(p) == [("Form", "in_buffer")]
-    assert "Tue 10/13 10:00am" in p["warnings"][0]["message"]
+    assert rows(p) == [("09:00", "12:00", "Plain", "ranked"), ("13:30", "14:00", "Plain", "ranked"),
+                       ("14:00", "15:00", "Meeting", "fixed"), ("15:00", "18:00", "Plain", "ranked")]
+    assert p["blocks"][2]["time"] == "14:00" and p["blocks"][2]["date_kind"] == "deadline"
+    assert p["warnings"] == []
 
 
-def test_deadline_time_already_passed_today_is_overdue():
+def test_fixed_time_outside_working_hours_is_booked_anyway():
+    st = state_of(T("Dinner", 90, deadline="2026-10-13", deadline_time="19:00"), T("Plain", 30))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "09:30", "Plain", "ranked"), ("19:00", "20:30", "Dinner", "fixed")]
+    assert p["capacity_min"] == 450 and p["free_min"] == 420
+    assert p["warnings"] == []
+
+
+def test_fixed_time_on_a_later_day_holds_that_time():
+    st = state_of(T("Talk", 60, deadline="2026-10-15", deadline_time="10:00"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert p["blocks"] == [] and outlook(p) == [("talk", "2026-10-15", 60)]
+
+
+def test_two_fixed_times_that_overlap_are_both_kept_with_a_warning():
+    st = state_of(T("A", 60, deadline="2026-10-13", deadline_time="14:00"),
+                  T("B", 60, deadline="2026-10-13", deadline_time="14:30"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("14:00", "15:00", "A", "fixed"), ("14:30", "15:30", "B", "fixed")]
+    assert kinds(p) == [("B", "overlap")]
+    assert p["warnings"][0]["message"] == "overlaps A at Tue 10/13 2:30pm"
+
+
+def test_fixed_time_already_over_today_is_overdue():
+    st = state_of(T("Form", 60, deadline="2026-10-13", deadline_time="10:00"))
+    p = planner.plan_day(st, TUE, time(11, 0), CFG)
+    assert rows(p) == [("11:00", "12:00", "Form", "urgent")]
+    assert kinds(p) == [("Form", "overdue")]
+    assert p["warnings"][0]["message"] == "its date Tue 10/13 10:00am has passed"
+
+
+def test_fixed_time_under_way_books_what_is_left_of_it():
     st = state_of(T("Form", 60, deadline="2026-10-13", deadline_time="10:00"))
     p = planner.plan_day(st, TUE, time(10, 30), CFG)
-    assert kinds(p) == [("Form", "overdue")]
-    assert p["warnings"][0]["message"] == "its deadline Tue 10/13 10:00am has passed"
+    assert rows(p) == [("10:30", "11:00", "Form", "fixed")]
+    assert p["warnings"] == []
 
 
-def test_deadline_without_time_is_not_overdue_until_the_day_ends():
+def test_hard_date_without_time_is_not_overdue_until_the_day_ends():
     st = state_of(T("Form", 60, deadline="2026-10-13"))
     p = planner.plan_day(st, TUE, time(17, 0), CFG)
-    assert kinds(p) == [("Form", "in_buffer")]
-    assert p["blocks"][0]["time"] is None
-
-
-def test_deadline_time_limits_the_hard_pass_on_the_deadline_day():
-    cfg = copy.deepcopy(CFG)
-    cfg["buffer_business_days"] = 0
-    st = state_of(T("Talk", 300, deadline="2026-10-13", deadline_time="12:00"))
-    p = planner.plan_day(st, TUE, None, cfg)
-    assert rows(p) == [("09:00", "12:00", "Talk", "dated")]
-    assert kinds(p) == [("Talk", "deadline_missed")]
-    assert p["warnings"][0]["minutes"] == 120
-    assert p["warnings"][0]["message"] == "needs 120 min more than fits before Tue 10/13 12:00pm"
+    assert rows(p) == [("17:00", "18:00", "Form", "dated")]
+    assert p["warnings"] == [] and p["blocks"][0]["time"] is None
 
 
 def test_deadline_time_that_is_not_a_real_time_counts_as_day_end():
@@ -354,12 +391,40 @@ def test_deadline_time_that_is_not_a_real_time_counts_as_day_end():
     assert p["warnings"] == [] and p["blocks"][0]["time"] is None
 
 
-def test_take_alap_until_keeps_the_time_after_it_free():
+def test_calendar_block_takes_time_out_whether_free_or_not():
     cal = planner._Calendar(CFG, TUE, None, [])
-    assert cal.take_alap(TUE, 60, until=15 * 60) == [(14 * 60, 15 * 60)]
-    assert cal.day(TUE) == [[9 * 60, 12 * 60], [13 * 60 + 30, 14 * 60], [15 * 60, 18 * 60]]
-    assert cal.total(TUE, until=10 * 60) == 60
-    assert cal.take_asap(TUE, 500, until=10 * 60) == [(9 * 60, 10 * 60)]
+    cal.block(TUE, 11 * 60, 14 * 60)
+    assert cal.day(TUE) == [[9 * 60, 11 * 60], [14 * 60, 18 * 60]]
+    cal.block(TUE, 19 * 60, 20 * 60)  # outside working hours: nothing changes
+    assert cal.total(TUE) == 360
+
+
+# ---------- priority tags
+
+def test_undated_tasks_go_high_then_medium_then_low_then_list_order():
+    st = state_of(T("L", 10, priority="low"), T("M1", 10), T("H", 10, priority="high"), T("M2", 10))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert [r[2] for r in rows(p)] == ["H", "M1", "M2", "L"]
+
+
+def test_aim_date_work_goes_before_undated_work_of_any_tag():
+    st = state_of(T("Undated", 400, priority="high"), T("Aim", 100, target="2026-10-30", priority="low"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p)[0] == ("09:00", "10:40", "Aim", "ahead")
+    assert sum(b["minutes"] for b in p["blocks"] if b["name"] == "Undated") == 350
+
+
+def test_aim_date_work_is_pulled_ahead_by_tag_then_list_order():
+    st = state_of(T("A", 300, target="2026-10-30"), T("B", 300, target="2026-10-30", priority="high"))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert rows(p) == [("09:00", "12:00", "B", "ahead"), ("13:30", "15:30", "B", "ahead"),
+                       ("15:30", "18:00", "A", "ahead")]
+
+
+def test_unknown_priority_counts_as_medium():
+    st = state_of(T("Odd", 10, priority="urgent!"), T("L", 10, priority="low"), T("M", 10))
+    p = planner.plan_day(st, TUE, None, CFG)
+    assert [r[2] for r in rows(p)] == ["Odd", "M", "L"]
 
 
 def test_fmt_hm():

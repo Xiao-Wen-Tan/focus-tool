@@ -45,6 +45,7 @@ $dist = Join-Path $env:LOCALAPPDATA "FocusTool\pyinstaller-dist"
     --collect-all tzdata `
     --hidden-import tzdata `
     --hidden-import win32cred `
+    --hidden-import win32crypt `
     --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQml --exclude-module PySide6.Qt3DCore `
     --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtCharts --exclude-module PySide6.QtNetwork `

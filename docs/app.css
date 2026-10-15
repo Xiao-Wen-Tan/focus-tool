@@ -23,6 +23,7 @@
   --k-dated: #FFC29B;
   --k-ranked: #8FD9C4;
   --k-ahead: #D8CBEF;
+  --k-fixed: #9EC5F2;
   --shadow: 0 1px 2px rgba(75, 68, 83, 0.06), 0 4px 16px rgba(75, 68, 83, 0.06);
   --radius: 16px;
   --tabs-h: 64px;
@@ -53,6 +54,7 @@
     --k-dated: #B98457;
     --k-ranked: #4E9C88;
     --k-ahead: #6E5F8C;
+    --k-fixed: #4F78A8;
     --shadow: none;
   }
 }
@@ -241,6 +243,9 @@ textarea.input { resize: vertical; min-height: 96px; }
 .row-main:active:not(.static) { background: var(--track); }
 .row-label { overflow-wrap: anywhere; }
 .row-sub { color: var(--dim); font-size: 14px; overflow-wrap: anywhere; }
+.tag { display: inline-block; min-width: 3.2em; padding: 0 6px; border-radius: 6px; font-size: 12px; font-weight: 650; text-align: center; vertical-align: 2px; color: var(--dim); border: 1px solid var(--dim); }
+.tag-high { color: var(--due); border-color: var(--due); }
+.tag-low { opacity: 0.7; }
 .row.due .row-label { color: var(--due); }
 .input.time { width: auto; flex: 0 0 auto; }
 .input.time[hidden] { display: none; }
@@ -338,6 +343,7 @@ textarea.input { resize: vertical; min-height: 96px; }
 .k-dated { background: var(--k-dated); }
 .k-ranked { background: var(--k-ranked); }
 .k-ahead { background: var(--k-ahead); }
+.k-fixed { background: var(--k-fixed); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .chip { font-size: 13px; padding: 3px 10px; border-radius: 12px; color: var(--text); }
 .warnings, .outlook { margin: 0; padding-left: 18px; }

@@ -3,7 +3,7 @@
 What lives here:
 - parse_plan: turns the pasted list into tasks (name, estimate, details).
 - TimerState: the countdown for the current task (remaining, elapsed, overtime, checkpoints).
-- list_end / save_state / load_state: finish-time projection and JSON persistence (state.json version 4).
+- list_end / save_state / load_state: finish-time projection and JSON persistence (state.json version 5).
 - migrate_doc / merge_docs / stamp_changes: read older files, and combine two copies of the list
   (phone and desktop) so that neither side loses an edit.
 - display_sections / reorder_ranked / finish_by / next_block: the dated and ranked parts of the list.
@@ -23,8 +23,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-STATE_VERSION = 4  # 3 adds ids, dates, folders, repeats and change stamps; 4 adds deadline times and folder
-# notes (a new number, so older apps refuse to write a list they would drop those from). 1 to 3 still load
+STATE_VERSION = 5  # 3 adds ids, dates, folders, repeats and change stamps; 4 adds deadline times and folder
+# notes; 5 adds the Low/Med/High priority tag (each a new number, so older apps refuse to write a list they would
+# drop those from). 1 to 4 still load
 EPOCH = "1970-01-01T00:00:00.000Z"
 NS = uuid.UUID("212d6585-c191-5e24-9304-4a619852c6c3")  # fixed namespace for ids made from names (migration)
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -37,6 +38,7 @@ DEFAULT_PLANNER = {
     "updated_at": EPOCH,
 }
 TOMBSTONE_DAYS = 60
+PRIORITIES = ("high", "med", "low")  # the priority tag, most important first; "med" is the default
 
 
 class NewerVersionError(ValueError):
@@ -71,6 +73,18 @@ class Task:
     id: str = field(default_factory=new_id)
     updated_at: str = EPOCH
     deadline_time: Optional[str] = None  # "HH:MM" (24-hour) the deadline falls at; None means the end of that day
+    priority: str = "med"  # "high", "med" or "low" (PRIORITIES)
+
+
+def priority_rank(t: Task) -> int:
+    """0 for High, 1 for Medium, 2 for Low. A value this app does not know counts as Medium."""
+    p = getattr(t, "priority", "med")
+    return PRIORITIES.index(p) if p in PRIORITIES else 1
+
+
+def by_priority(tasks: Iterable[Task]) -> List[Task]:
+    """High tasks first, then Medium, then Low; list order inside each tag (a stable sort)."""
+    return sorted(tasks, key=priority_rank)
 
 
 @dataclass
@@ -329,7 +343,7 @@ class State:
 
 
 _TASK_FIELDS = ("name", "estimate_min", "details", "spent_s", "deadline", "target", "folder", "repeat", "last_done",
-                "deadline_time")
+                "deadline_time", "priority")
 _DONE_FIELDS = ("name", "estimate_min", "actual_min", "finished_at", "details", "deadline", "target", "folder",
                 "deadline_time")
 
@@ -346,7 +360,7 @@ def task_from_dict(x: dict) -> Task:
                 deadline=x.get("deadline"), target=x.get("target"), folder=x.get("folder"),
                 repeat=copy.deepcopy(x.get("repeat")), last_done=x.get("last_done"),
                 id=x.get("id") or new_id(), updated_at=x.get("updated_at") or EPOCH,
-                deadline_time=x.get("deadline_time"))
+                deadline_time=x.get("deadline_time"), priority=x.get("priority") or "med")
 
 
 def _done_to_dict(d: DoneTask) -> dict:
@@ -364,7 +378,7 @@ def _done_from_dict(x: dict) -> DoneTask:
 
 
 def state_to_doc(st: State) -> dict:
-    """The state.json version 4 document for a State."""
+    """The state.json version 5 document for a State."""
     return {
         "version": STATE_VERSION,
         "plan": {"tasks": [task_to_dict(t) for t in st.plan.tasks]},
@@ -437,13 +451,13 @@ def _fill_progress(x: dict) -> dict:
 
 
 def migrate_doc(d: dict) -> dict:
-    """A complete version 4 document from a version 1, 2, 3 or 4 one, with every missing field filled in.
+    """A complete version 5 document from a version 1 to 5 one, with every missing field filled in.
 
     Ids made here depend only on the old content, so two computers that migrate the same file agree:
     task id = uuid5(NS, "task:" + name + "#" + n) where n counts earlier tasks with the same name (0, 1, ...),
     done id = uuid5(NS, "done:" + name + "#" + finished_at). The timer's task_id is the task at the saved
     index if its name matches the timer's task, else the first task with that name. Stamps start at EPOCH.
-    Raises NewerVersionError if the version is newer than 3, ValueError if it is not a number.
+    Raises NewerVersionError if the version is newer than 5, ValueError if it is not a number.
     """
     if not isinstance(d, dict):
         raise ValueError("state document is not an object")
@@ -500,7 +514,7 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def save_state_obj(path: Path, st: State) -> str:
-    """Write the whole State as version 4 in one step (temp file, then rename) and return the text written."""
+    """Write the whole State as version 5 in one step (temp file, then rename) and return the text written."""
     text = json.dumps(state_to_doc(st), indent=2, ensure_ascii=False)
     _write_text(path, text)
     return text
@@ -717,7 +731,8 @@ def display_sections(tasks: List[Task], today: Optional[date] = None) -> tuple:
     target-only task on the same date, an earlier deadline time first (no time counts as day end), then
     list order. Without `today`, a repeating task with a deadline is dated by that deadline and one without
     is ranked. With `today`, every repeating task is dated by the next day it comes up (next_due_day), which
-    counts as a deadline at the end of that day. Ranked: all other tasks in list order."""
+    counts as a deadline at the end of that day. Ranked: all other tasks, High then Medium then Low, list order
+    inside each tag."""
     dated, ranked = [], []
     for i, t in enumerate(tasks):
         due = next_due_day(t, today) if today is not None else None
@@ -729,7 +744,7 @@ def display_sections(tasks: List[Task], today: Optional[date] = None) -> tuple:
             dated.append((first, t.deadline is None, 1440 if hm is None else hm, i, t))
         else:
             ranked.append(t)
-    return [x[4] for x in sorted(dated, key=lambda x: x[:4])], ranked
+    return [x[4] for x in sorted(dated, key=lambda x: x[:4])], by_priority(ranked)
 
 
 def reorder_ranked(tasks: List[Task], ranked_ids: list) -> List[Task]:
@@ -887,8 +902,14 @@ def _under(folder: Optional[str], path: str) -> bool:
     return folder is not None and (folder == path or folder.startswith(path + "/"))
 
 
+NO_FOLDER = "\x00none"  # a folder filter that shows only the tasks without a folder
+
+
 def in_folder(task: Task, path: Optional[str]) -> bool:
-    """True if `task` is in folder `path` or one of its subfolders. path None means all tasks."""
+    """True if `task` is in folder `path` or one of its subfolders. path None means all tasks, NO_FOLDER means
+    the tasks without a folder."""
+    if path == NO_FOLDER:
+        return not task.folder
     return path is None or _under(task.folder, path)
 
 

@@ -5,7 +5,7 @@ import {
   EPOCH, WEEKDAY_KEYS, newId, clone, zonedParts, displaySections, reorderRanked, isActive, isDated,
   nextActiveDay, nextDueDay, expiredRepeats, nextBlock, finishTask, timerElapsedS, timerView, timerTick, timerStart, timerPause,
   timerResume, timerAddMinutes, timerSkip, roundHalfEven, addFolder, weekday, taskDate, deepEqual,
-  emptyDoc, normalizeDoc, VersionError, STATE_VERSION, parseHm,
+  emptyDoc, normalizeDoc, VersionError, STATE_VERSION, parseHm, PRIORITIES, priorityRank, byPriority,
 } from "./core.js";
 
 export const TIME_PRESETS = [5, 10, 15, 25, 30, 45, 60, 90];
@@ -148,8 +148,13 @@ export function mascot(doc, nowNaive, celebrating) {
 
 // ---------------------------------------------------------------- what to do next
 
+/** My order as the List tab shows it: High, then Medium, then Low, your order inside each tag. */
+export function myOrder(tasks) {
+  return byPriority(tasks);
+}
+
 /** Tasks in the order the List tab's By date view shows them: dated tasks (repeats by the next day they come
- * up) first, then the rest in your order. */
+ * up) first, then the rest by tag and your order. */
 export function displayOrder(doc, today) {
   const [dated, ranked] = displaySections(doc.plan.tasks, today);
   return [...dated, ...ranked];
@@ -169,8 +174,13 @@ export function upNext(doc, dayPlan, now) {
 function blankTask() {
   return {
     id: newId(), name: "", estimate_min: DEFAULT_MINUTES, details: "", spent_s: 0, deadline: null, target: null,
-    folder: null, repeat: null, last_done: null, updated_at: EPOCH, deadline_time: null,
+    folder: null, repeat: null, last_done: null, updated_at: EPOCH, deadline_time: null, priority: "med",
   };
+}
+
+/** The tag's short name for a row: "High", "Med" or "Low". */
+export function priorityLabel(t) {
+  return { high: "High", low: "Low" }[t.priority] || "Med";
 }
 
 function cleanFields(f) {
@@ -181,18 +191,20 @@ function cleanFields(f) {
   for (const k of ["deadline", "target", "folder"]) if (f[k] !== undefined) out[k] = f[k] || null;
   if (f.repeat !== undefined) out.repeat = f.repeat ? clone(f.repeat) : null;
   if (f.deadline_time !== undefined) out.deadline_time = cleanTime(f.deadline_time);
+  if (f.priority !== undefined) out.priority = PRIORITIES.includes(f.priority) ? f.priority : "med";
   // A repeating task may keep a deadline, the last day it repeats (contract section 1). It never has a target.
   if (out.repeat) out.target = null;
   return out;
 }
 
-/** New task at the FRONT of the list. Returns it, or null when the name is empty. */
+/** New task at the END of the list, so tasks entered earlier stay above it inside their tag. Returns it, or
+ * null when the name is empty. */
 export function addTask(doc, fields) {
   const f = cleanFields(fields);
   if (!f.name) return null;
   const t = Object.assign(blankTask(), f);
   if (!t.deadline || t.repeat) t.deadline_time = null; // the time belongs to a hard deadline only
-  doc.plan.tasks.unshift(t);
+  doc.plan.tasks.push(t);
   if (t.folder && !doc.folders.includes(t.folder)) addFolder(doc, t.folder);
   return t;
 }
@@ -313,11 +325,18 @@ function rankedIds(doc) {
   return doc.plan.tasks.filter((t) => !isDated(t)).map((t) => t.id);
 }
 
+/** The ids in `ids` whose task has the same priority tag as task `id`: a task moves only inside its tag. */
+function sameTag(doc, id, ids) {
+  const byId = new Map(doc.plan.tasks.map((t) => [t.id, t]));
+  const t = byId.get(id);
+  return t ? ids.filter((i) => byId.has(i) && priorityRank(byId.get(i)) === priorityRank(t)) : [];
+}
+
 /** Move a ranked task one place up (-1) or down (+1) among `visibleIds` (the ranked tasks the
- * current folder filter shows). It swaps places with its visible neighbour. */
+ * current folder filter shows) that share its tag. It swaps places with its visible neighbour. */
 export function moveRanked(doc, id, delta, visibleIds = null) {
   const ids = rankedIds(doc);
-  const shown = (visibleIds || ids).filter((i) => ids.includes(i));
+  const shown = sameTag(doc, id, (visibleIds || ids).filter((i) => ids.includes(i)));
   const k = shown.indexOf(id);
   const j = k + delta;
   if (k < 0 || j < 0 || j >= shown.length) return false;
@@ -335,11 +354,12 @@ export function moveRankedToTop(doc, id) {
 }
 
 /** My order: move any task, dated or not, one place up (-1) or down (+1) among `visibleIds` (the tasks the
- * current folder filter shows). It swaps places with its visible neighbour; hidden tasks keep their places. */
+ * current folder filter shows) that share its tag. It swaps places with its visible neighbour; hidden tasks keep
+ * their places. */
 export function moveTask(doc, id, delta, visibleIds = null) {
   const tasks = doc.plan.tasks;
   const ids = tasks.map((t) => t.id);
-  const shown = (visibleIds || ids).filter((i) => ids.includes(i));
+  const shown = sameTag(doc, id, (visibleIds || ids).filter((i) => ids.includes(i)));
   const k = shown.indexOf(id);
   const j = k + delta;
   if (k < 0 || j < 0 || j >= shown.length) return false;
@@ -525,7 +545,7 @@ export function mayAutoSync(authPaused, force) {
  * so a change made on another device meanwhile (say a rename) is not undone by Save. */
 export function changedFields(original, form) {
   const out = {};
-  for (const k of ["name", "estimate_min", "details", "deadline", "target", "folder", "repeat", "deadline_time"]) {
+  for (const k of ["name", "estimate_min", "details", "deadline", "target", "folder", "repeat", "deadline_time", "priority"]) {
     const a = original[k] === undefined ? null : original[k];
     const b = form[k] === undefined ? null : form[k];
     if (!deepEqual(a, b)) out[k] = b;
